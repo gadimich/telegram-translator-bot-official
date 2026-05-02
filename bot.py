@@ -596,7 +596,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             translation, in_tok, out_tok = await translate(transcript, src_lang, tgt)
             await synthesize(translation, out_path)
 
-            whisper_cost = duration * 0.006 / 60
+            whisper_cost = max(duration, 1) * 0.006 / 60
             gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
             tts_cost     = len(translation) * 15.0 / 1_000_000
             total_cost   = whisper_cost + gpt_cost + tts_cost

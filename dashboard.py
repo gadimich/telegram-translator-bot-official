@@ -88,17 +88,24 @@ async def dashboard(_: None = Depends(require_auth)):
         ORDER BY msgs_month DESC, msgs_total DESC
     """, period)
 
+    def smart_usd(v: float) -> str:
+        if abs(v) < 0.001:
+            return f"${v:.5f}"
+        if abs(v) < 0.01:
+            return f"${v:.4f}"
+        return f"${v:.2f}"
+
     def fmt_usd(v: float) -> str:
         if v == 0:
             return '<span class="text-gray-300">—</span>'
         color = "text-emerald-500" if v > 0 else "text-red-400"
         sign = "-" if v < 0 else ""
-        return f'<span class="{color} font-medium">{sign}${abs(v):.2f}</span>'
+        return f'<span class="{color} font-medium">{sign}{smart_usd(abs(v))}</span>'
 
     def fmt_cost(v: float) -> str:
         if v == 0:
             return '<span class="text-gray-300">—</span>'
-        return f'<span class="text-red-400">${v:.3f}</span>'
+        return f'<span class="text-red-400">{smart_usd(v)}</span>'
 
     plan_badge = {
         "free":  '<span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500 font-medium">Free</span>',
@@ -143,6 +150,11 @@ async def dashboard(_: None = Depends(require_auth)):
           {"" if not sub else f'<div class="text-xs text-gray-400 mt-1">{sub}</div>'}
         </div>"""
 
+    def s_usd(v):
+        if abs(v) < 0.001: return f"${v:.5f}"
+        if abs(v) < 0.01:  return f"${v:.4f}"
+        return f"${v:.2f}"
+
     profit_class = "text-emerald-500" if profit_month >= 0 else "text-red-400"
     profit_total_class = "text-emerald-500" if profit_total >= 0 else "text-red-400"
     updated = datetime.now(timezone.utc).strftime("%-d %b %Y %H:%M")
@@ -176,9 +188,9 @@ async def dashboard(_: None = Depends(require_auth)):
   </div>
 
   <div class="grid grid-cols-3 gap-4 mb-8">
-    {card("OpenAI Cost This Month", f"${cost_month:.2f}", value_class="text-red-400")}
-    {card("OpenAI Cost Total", f"${cost_total:.2f}", value_class="text-red-400")}
-    {card("Net Profit This Month", f"${profit_month:.2f}", "revenue − OpenAI cost", profit_class)}
+    {card("OpenAI Cost This Month", s_usd(cost_month), value_class="text-red-400")}
+    {card("OpenAI Cost Total", s_usd(cost_total), value_class="text-red-400")}
+    {card("Net Profit This Month", s_usd(profit_month), "revenue − OpenAI cost", profit_class)}
   </div>
 
   <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
