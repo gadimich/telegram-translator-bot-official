@@ -31,7 +31,7 @@ UI_STRINGS: dict[str, str] = {
     "upgrade_pro_btn": "⭐ Pro — Unlimited ($19.99)",
     "plan_activated": "✅ {plan} activated! You're good until {date}. Send a voice message to keep translating! 🎙",
     "plan_status_pro": "⭐ Pro — unlimited (until {date})",
-    "plan_status_basic": "⭐ Basic — {count}/100 messages (until {date})",
+    "plan_status_basic": "⭐ Basic — {count}/{limit} messages (until {date})",
     "plan_status_free": "Free — {count}/{limit} messages this month",
     "help_text": (
         "Send me a voice message — I'll translate it and reply with a voice note.\n\n"

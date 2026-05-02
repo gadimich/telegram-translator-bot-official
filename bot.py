@@ -117,8 +117,9 @@ def settings_keyboard(s: dict) -> InlineKeyboardMarkup:
 
 
 # ---------- Plans ----------
-FREE_LIMIT = int(os.getenv("FREE_LIMIT", "10"))
-PLAN_LIMITS: dict[str, int | None] = {"free": FREE_LIMIT, "basic": 100, "pro": None}
+FREE_LIMIT  = int(os.getenv("FREE_LIMIT",  "10"))
+BASIC_LIMIT = int(os.getenv("BASIC_LIMIT", "100"))
+PLAN_LIMITS: dict[str, int | None] = {"free": FREE_LIMIT, "basic": BASIC_LIMIT, "pro": None}
 PLAN_STARS:  dict[str, int]        = {"basic": int(os.getenv("BASIC_STARS", "460")), "pro": int(os.getenv("PRO_STARS", "1538"))}
 
 
@@ -252,7 +253,7 @@ async def _plan_status(pool: asyncpg.Pool, user_id: int, s: dict) -> str:
             row = await conn.fetchrow("SELECT plan_until FROM user_prefs WHERE user_id = $1", user_id)
         date = row["plan_until"].strftime("%b %-d") if row and row["plan_until"] else "?"
         count = await get_message_count(pool, user_id)
-        return s["plan_status_basic"].format(count=count, date=date)
+        return s["plan_status_basic"].format(count=count, limit=BASIC_LIMIT, date=date)
     else:
         count = await get_message_count(pool, user_id)
         return s["plan_status_free"].format(count=count, limit=FREE_LIMIT)
