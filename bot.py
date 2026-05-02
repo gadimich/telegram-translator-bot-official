@@ -466,7 +466,6 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         title=label,
         description=s["upgrade_basic_btn"] if plan == "basic" else s["upgrade_pro_btn"],
         payload=plan,
-        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label, stars)],
     )
