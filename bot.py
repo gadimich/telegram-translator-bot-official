@@ -119,7 +119,7 @@ def settings_keyboard(s: dict) -> InlineKeyboardMarkup:
 # ---------- Plans ----------
 FREE_LIMIT = int(os.getenv("FREE_LIMIT", "10"))
 PLAN_LIMITS: dict[str, int | None] = {"free": FREE_LIMIT, "basic": 100, "pro": None}
-PLAN_STARS:  dict[str, int]        = {"basic": 460, "pro": 1538}
+PLAN_STARS:  dict[str, int]        = {"basic": int(os.getenv("BASIC_STARS", "460")), "pro": int(os.getenv("PRO_STARS", "1538"))}
 
 
 def upgrade_keyboard(s: dict) -> InlineKeyboardMarkup:
@@ -245,12 +245,12 @@ async def _plan_status(pool: asyncpg.Pool, user_id: int, s: dict) -> str:
     if plan == "pro":
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT plan_until FROM user_prefs WHERE user_id = $1", user_id)
-        date = row["plan_until"].strftime("%b %d") if row and row["plan_until"] else "?"
+        date = row["plan_until"].strftime("%b %-d") if row and row["plan_until"] else "?"
         return s["plan_status_pro"].format(date=date)
     elif plan == "basic":
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT plan_until FROM user_prefs WHERE user_id = $1", user_id)
-        date = row["plan_until"].strftime("%b %d") if row and row["plan_until"] else "?"
+        date = row["plan_until"].strftime("%b %-d") if row and row["plan_until"] else "?"
         count = await get_message_count(pool, user_id)
         return s["plan_status_basic"].format(count=count, date=date)
     else:
@@ -457,18 +457,21 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     await query.answer()
     plan = query.data[4:]  # "basic" or "pro"
-    pool: asyncpg.Pool = context.bot_data["pool"]
-    s = await _strings_for(pool, query.from_user.id)
     stars = PLAN_STARS[plan]
-    label = "Basic — 100 msgs/month" if plan == "basic" else "Pro — Unlimited"
-    await context.bot.send_invoice(
-        chat_id=query.from_user.id,
-        title=label,
-        description=s["upgrade_basic_btn"] if plan == "basic" else s["upgrade_pro_btn"],
-        payload=plan,
-        currency="XTR",
-        prices=[LabeledPrice(label, stars)],
-    )
+    title = "Basic Plan" if plan == "basic" else "Pro Plan"
+    description = "100 messages per month" if plan == "basic" else "Unlimited messages per month"
+    try:
+        await context.bot.send_invoice(
+            chat_id=query.from_user.id,
+            title=title,
+            description=description,
+            payload=plan,
+            currency="XTR",
+            prices=[LabeledPrice(title, stars)],
+        )
+    except Exception as e:
+        log.exception("send_invoice failed: %s", e)
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"Invoice error: {e}")
 
 
 async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -482,7 +485,7 @@ async def payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await set_plan(pool, msg.from_user.id, plan)
     s = await _strings_for(pool, msg.from_user.id)
     from datetime import datetime, timedelta
-    expiry = (datetime.utcnow() + timedelta(days=30)).strftime("%b %d")
+    expiry = (datetime.utcnow() + timedelta(days=30)).strftime("%b %-d")
     plan_label = "Basic" if plan == "basic" else "Pro"
     await msg.reply_text(s["plan_activated"].format(plan=plan_label, date=expiry))
 
@@ -579,6 +582,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await status.edit_text(s["error"].format(error=type(e).__name__))
 
 
+# ---------- Admin ----------
+ADMIN_ID = 981622851
+
+async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        return
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMyStarBalance")
+    stars = resp.json()["result"]["amount"]
+    await update.message.reply_text(f"⭐ Bot balance: {stars} Stars")
+
+
 # ---------- Error handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
@@ -616,6 +632,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("setlang", setlang))
+    app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CallbackQueryHandler(src_callback,        pattern="^src_"))
     app.add_handler(CallbackQueryHandler(tgt_callback,        pattern="^tgt_"))
     app.add_handler(CallbackQueryHandler(change_src_callback, pattern="^change_src$"))
