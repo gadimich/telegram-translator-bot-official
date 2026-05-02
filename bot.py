@@ -11,11 +11,11 @@ Pipeline: Telegram Bot API -> Whisper -> GPT-4o-mini -> OpenAI TTS
 from __future__ import annotations
 
 import os
-import json
 import logging
 import tempfile
 from pathlib import Path
 
+import asyncpg
 from telegram import Update
 from telegram.error import Conflict
 from telegram.ext import (
@@ -40,16 +40,14 @@ log = logging.getLogger("voice-translator")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-# Optional override: send the translated voice somewhere else instead of
-# replying to the sender. Numeric chat_id or @channel_username.
 FORWARD_TO = os.getenv("FORWARD_TO", "").strip()
 
-# Comma-separated allowed Telegram user IDs.
 ALLOWED_USERS = {
     int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()
 }
 
 TTS_VOICE = os.getenv("TTS_VOICE", "alloy")
+DEFAULT_SOURCE = os.getenv("DEFAULT_SOURCE_LANG", "en")
 
 # ---------- Language config ----------
 SUPPORTED = {
@@ -57,33 +55,43 @@ SUPPORTED = {
     "es": {"name": "Spanish", "flag": "🇪🇸"},
 }
 
-# Per-user source-language preferences, persisted to disk.
-PREFS_FILE = Path(os.getenv("PREFS_FILE", "user_prefs.json"))
-DEFAULT_SOURCE = os.getenv("DEFAULT_SOURCE_LANG", "en")  # used if user hasn't set one
-
-
-def load_prefs() -> dict[str, str]:
-    if PREFS_FILE.exists():
-        try:
-            return json.loads(PREFS_FILE.read_text())
-        except Exception:
-            log.warning("Couldn't read %s, starting fresh", PREFS_FILE)
-    return {}
-
-
-def save_prefs(prefs: dict[str, str]) -> None:
-    PREFS_FILE.write_text(json.dumps(prefs, indent=2))
-
-
-user_prefs: dict[str, str] = load_prefs()
-
-
-def get_source_lang(user_id: int) -> str:
-    return user_prefs.get(str(user_id), DEFAULT_SOURCE)
-
 
 def opposite(lang: str) -> str:
     return "es" if lang == "en" else "en"
+
+
+# ---------- DB helpers ----------
+async def init_db(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_prefs (
+                user_id     BIGINT PRIMARY KEY,
+                source_lang TEXT NOT NULL,
+                updated_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+
+async def get_user_lang(pool: asyncpg.Pool, user_id: int) -> str | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT source_lang FROM user_prefs WHERE user_id = $1", user_id
+        )
+    return row["source_lang"] if row else None
+
+
+async def set_user_lang(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_prefs (user_id, source_lang, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET source_lang = $2, updated_at = NOW()
+        """, user_id, lang)
+
+
+async def clear_user_lang(pool: asyncpg.Pool, user_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM user_prefs WHERE user_id = $1", user_id)
 
 
 # ---------- Pipeline ----------
@@ -160,7 +168,8 @@ async def synthesize(text: str, out_path: Path) -> Path:
 # ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    lang = user_prefs.get(str(user.id))
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    lang = await get_user_lang(pool, user.id)
     if lang:
         tgt = opposite(lang)
         mode = (f"Fixed: {SUPPORTED[lang]['flag']} {SUPPORTED[lang]['name']} "
@@ -192,12 +201,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    pool: asyncpg.Pool = context.bot_data["pool"]
     args = context.args or []
     arg = args[0].lower() if args else ""
 
     if arg in ("clear", "auto", ""):
-        user_prefs.pop(str(user.id), None)
-        save_prefs(user_prefs)
+        await clear_user_lang(pool, user.id)
         await update.message.reply_text("✅ Cleared — I'll auto-detect your language from now on.")
         return
 
@@ -210,8 +219,7 @@ async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    user_prefs[str(user.id)] = arg
-    save_prefs(user_prefs)
+    await set_user_lang(pool, user.id, arg)
     tgt = opposite(arg)
     await update.message.reply_text(
         f"✅ Fixed to:\n"
@@ -224,7 +232,8 @@ async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    lang = user_prefs.get(str(user.id))
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    lang = await get_user_lang(pool, user.id)
     if lang:
         tgt = opposite(lang)
         text = (f"<b>{SUPPORTED[lang]['flag']} {SUPPORTED[lang]['name']} "
@@ -238,6 +247,7 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     user = update.effective_user
+    pool: asyncpg.Pool = context.bot_data["pool"]
 
     if ALLOWED_USERS and user.id not in ALLOWED_USERS:
         log.warning("Unauthorized user %s (%s)", user.id, user.username)
@@ -273,7 +283,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             tg_file = await audio_obj.get_file()
             await tg_file.download_to_drive(custom_path=str(in_path))
 
-            transcript, src_lang = await transcribe(in_path, hint=user_prefs.get(str(user.id)))
+            hint = await get_user_lang(pool, user.id)
+            transcript, src_lang = await transcribe(in_path, hint=hint)
             tgt_lang = opposite(src_lang)
             log.info("%s -> %s", src_lang, tgt_lang)
             await status.edit_text(
@@ -289,20 +300,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             target_chat = FORWARD_TO if FORWARD_TO else msg.chat_id
 
-            # 1) Translated voice message
             with open(out_path, "rb") as f:
-                await context.bot.send_voice(
-                    chat_id=target_chat,
-                    voice=f,
-                )
+                await context.bot.send_voice(chat_id=target_chat, voice=f)
 
-            # 2) Source transcript (what was said)
             await context.bot.send_message(
                 chat_id=target_chat,
                 text=f"{SUPPORTED[src_lang]['flag']} {transcript}",
             )
 
-            # 3) Target translation (what the voice says)
             await context.bot.send_message(
                 chat_id=target_chat,
                 text=f"{SUPPORTED[tgt_lang]['flag']} {translation}",
@@ -326,9 +331,29 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     log.exception("Unhandled error: %s", context.error)
 
 
+# ---------- Lifecycle ----------
+async def post_init(application: Application) -> None:
+    pool = await asyncpg.create_pool(os.environ["DATABASE_URL"])
+    await init_db(pool)
+    application.bot_data["pool"] = pool
+    log.info("DB pool ready")
+
+
+async def post_shutdown(application: Application) -> None:
+    await application.bot_data["pool"].close()
+    log.info("DB pool closed")
+
+
 # ---------- Main ----------
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
@@ -340,9 +365,7 @@ def main() -> None:
     log.info("Bot starting. Allowed users: %s",
              ALLOWED_USERS if ALLOWED_USERS else "ANYONE (open)")
     log.info("Forward target: %s", FORWARD_TO if FORWARD_TO else "reply to sender")
-    log.info("Default source language: %s (used until user runs /setlang)",
-             DEFAULT_SOURCE)
-    log.info("Loaded %d saved user preferences", len(user_prefs))
+    log.info("Default source language: %s", DEFAULT_SOURCE)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
