@@ -125,7 +125,7 @@ PLAN_STARS:  dict[str, int]        = {"basic": int(os.getenv("BASIC_STARS", "460
 
 def upgrade_keyboard(s: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(s["upgrade_basic_btn"], callback_data="buy_basic")],
+        [InlineKeyboardButton(s["upgrade_basic_btn"].format(limit=BASIC_LIMIT), callback_data="buy_basic")],
         [InlineKeyboardButton(s["upgrade_pro_btn"],   callback_data="buy_pro")],
     ])
 
