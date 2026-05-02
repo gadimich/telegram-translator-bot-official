@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 import asyncpg
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.error import Conflict
 from telegram.ext import (
     Application,
@@ -24,6 +24,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 from openai import AsyncOpenAI
@@ -115,6 +116,19 @@ def settings_keyboard(s: dict) -> InlineKeyboardMarkup:
     ]])
 
 
+# ---------- Plans ----------
+FREE_LIMIT = int(os.getenv("FREE_LIMIT", "10"))
+PLAN_LIMITS: dict[str, int | None] = {"free": FREE_LIMIT, "basic": 100, "pro": None}
+PLAN_STARS:  dict[str, int]        = {"basic": 460, "pro": 1538}
+
+
+def upgrade_keyboard(s: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(s["upgrade_basic_btn"], callback_data="buy_basic")],
+        [InlineKeyboardButton(s["upgrade_pro_btn"],   callback_data="buy_pro")],
+    ])
+
+
 # ---------- DB helpers ----------
 async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
@@ -128,6 +142,16 @@ async def init_db(pool: asyncpg.Pool) -> None:
         """)
         await conn.execute("ALTER TABLE user_prefs ALTER COLUMN source_lang DROP NOT NULL")
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS target_lang TEXT")
+        await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
+        await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS plan_until TIMESTAMPTZ")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage (
+                user_id BIGINT,
+                period  TEXT,
+                count   INT DEFAULT 0,
+                PRIMARY KEY (user_id, period)
+            )
+        """)
 
 
 async def get_user_prefs(pool: asyncpg.Pool, user_id: int) -> tuple[str | None, str | None]:
@@ -156,6 +180,49 @@ async def set_user_target(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
         """, user_id, lang)
 
 
+async def get_plan(pool: asyncpg.Pool, user_id: int) -> str:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT plan, plan_until FROM user_prefs WHERE user_id = $1", user_id
+        )
+    if not row:
+        return "free"
+    plan = row["plan"] or "free"
+    if plan != "free" and (row["plan_until"] is None or row["plan_until"].timestamp() < __import__("time").time()):
+        return "free"
+    return plan
+
+
+async def set_plan(pool: asyncpg.Pool, user_id: int, plan: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_prefs (user_id, plan, plan_until, updated_at)
+            VALUES ($1, $2, NOW() + INTERVAL '1 month', NOW())
+            ON CONFLICT (user_id) DO UPDATE
+                SET plan = $2, plan_until = NOW() + INTERVAL '1 month', updated_at = NOW()
+        """, user_id, plan)
+
+
+async def get_message_count(pool: asyncpg.Pool, user_id: int) -> int:
+    from datetime import datetime
+    period = datetime.utcnow().strftime("%Y-%m")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT count FROM usage WHERE user_id = $1 AND period = $2", user_id, period
+        )
+    return row["count"] if row else 0
+
+
+async def increment_usage(pool: asyncpg.Pool, user_id: int) -> None:
+    from datetime import datetime
+    period = datetime.utcnow().strftime("%Y-%m")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO usage (user_id, period, count) VALUES ($1, $2, 1)
+            ON CONFLICT (user_id, period) DO UPDATE SET count = usage.count + 1
+        """, user_id, period)
+
+
 # ---------- UI string helpers ----------
 def _tg_lang(user) -> str | None:
     code = (user.language_code or "").split("-")[0].lower()
@@ -170,6 +237,25 @@ async def _strings(lang: str) -> dict[str, str]:
 async def _strings_for(pool: asyncpg.Pool, user_id: int) -> dict[str, str]:
     src, _ = await get_user_prefs(pool, user_id)
     return await _strings(src or "en")
+
+
+async def _plan_status(pool: asyncpg.Pool, user_id: int, s: dict) -> str:
+    from datetime import datetime
+    plan = await get_plan(pool, user_id)
+    if plan == "pro":
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT plan_until FROM user_prefs WHERE user_id = $1", user_id)
+        date = row["plan_until"].strftime("%b %d") if row and row["plan_until"] else "?"
+        return s["plan_status_pro"].format(date=date)
+    elif plan == "basic":
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT plan_until FROM user_prefs WHERE user_id = $1", user_id)
+        date = row["plan_until"].strftime("%b %d") if row and row["plan_until"] else "?"
+        count = await get_message_count(pool, user_id)
+        return s["plan_status_basic"].format(count=count, date=date)
+    else:
+        count = await get_message_count(pool, user_id)
+        return s["plan_status_free"].format(count=count, limit=FREE_LIMIT)
 
 
 # ---------- Pipeline ----------
@@ -240,12 +326,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = await _strings(ui_lang)
 
     if tgt:
-        # Setup complete — show status and settings
         src_label = lang_label(src) if src and src in SUPPORTED else "🔄 Auto-detect"
+        plan_status = await _plan_status(pool, user.id, s)
         await update.message.reply_text(
-            s["welcome_back"].format(
-                name=user.first_name, src=src_label, tgt=lang_label(tgt)
-            ),
+            s["welcome_back"].format(name=user.first_name, src=src_label, tgt=lang_label(tgt))
+            + f"\n\n{plan_status}",
             reply_markup=settings_keyboard(s),
         )
         return
@@ -283,8 +368,10 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if tgt:
         src_label = lang_label(src) if src and src in SUPPORTED else "🔄 Auto-detect"
+        plan_status = await _plan_status(pool, user.id, s)
         await update.message.reply_text(
-            s["current_settings"].format(src=src_label, tgt=lang_label(tgt)),
+            s["current_settings"].format(src=src_label, tgt=lang_label(tgt))
+            + f"\n\n{plan_status}",
             reply_markup=settings_keyboard(s),
         )
     elif src:
@@ -365,6 +452,42 @@ async def change_tgt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+# ---------- Payment callbacks ----------
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    plan = query.data[4:]  # "basic" or "pro"
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    s = await _strings_for(pool, query.from_user.id)
+    stars = PLAN_STARS[plan]
+    label = "Basic — 100 msgs/month" if plan == "basic" else "Pro — Unlimited"
+    await context.bot.send_invoice(
+        chat_id=query.from_user.id,
+        title=label,
+        description=s["upgrade_basic_btn"] if plan == "basic" else s["upgrade_pro_btn"],
+        payload=plan,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label, stars)],
+    )
+
+
+async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.pre_checkout_query.answer(ok=True)
+
+
+async def payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    plan = msg.successful_payment.invoice_payload  # "basic" or "pro"
+    await set_plan(pool, msg.from_user.id, plan)
+    s = await _strings_for(pool, msg.from_user.id)
+    from datetime import datetime, timedelta
+    expiry = (datetime.utcnow() + timedelta(days=30)).strftime("%b %d")
+    plan_label = "Basic" if plan == "basic" else "Pro"
+    await msg.reply_text(s["plan_activated"].format(plan=plan_label, date=expiry))
+
+
 # ---------- Voice handler ----------
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
@@ -386,6 +509,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not tgt:
         await msg.reply_text(s["setup_first"])
         return
+
+    # --- Plan / usage gate ---
+    plan = await get_plan(pool, user.id)
+    limit = PLAN_LIMITS[plan]
+    if limit is not None:
+        count = await get_message_count(pool, user.id)
+        if count >= limit:
+            await msg.reply_text(
+                s["limit_hit"].format(limit=limit),
+                reply_markup=upgrade_keyboard(s),
+            )
+            return
 
     audio_obj = msg.voice or msg.audio
     duration = getattr(audio_obj, "duration", 0)
@@ -435,6 +570,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
             await status.delete()
+            await increment_usage(pool, user.id)
 
             if FORWARD_TO and str(target_chat) != str(msg.chat_id):
                 await msg.reply_text(f"✅ Sent to {FORWARD_TO}")
@@ -485,6 +621,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(tgt_callback,        pattern="^tgt_"))
     app.add_handler(CallbackQueryHandler(change_src_callback, pattern="^change_src$"))
     app.add_handler(CallbackQueryHandler(change_tgt_callback, pattern="^change_tgt$"))
+    app.add_handler(CallbackQueryHandler(buy_callback,         pattern="^buy_"))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     log.info("Bot starting. Allowed users: %s",

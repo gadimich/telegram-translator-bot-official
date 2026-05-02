@@ -26,6 +26,13 @@ UI_STRINGS: dict[str, str] = {
     "too_long": "That's {duration}s — please keep messages under 5 minutes.",
     "error": "⚠️ Something went wrong: {error}",
     "private_bot": "Sorry, this bot is private. Ask the owner to add your user ID.",
+    "limit_hit": "You've used all {limit} free messages this month. Upgrade to keep translating.",
+    "upgrade_basic_btn": "⭐ Basic — 100 msgs/month ($5.99)",
+    "upgrade_pro_btn": "⭐ Pro — Unlimited ($19.99)",
+    "plan_activated": "✅ {plan} activated! You're good until {date}. Send a voice message to keep translating! 🎙",
+    "plan_status_pro": "⭐ Pro — unlimited (until {date})",
+    "plan_status_basic": "⭐ Basic — {count}/100 messages (until {date})",
+    "plan_status_free": "Free — {count}/{limit} messages this month",
     "help_text": (
         "Send me a voice message — I'll translate it and reply with a voice note.\n\n"
         "Commands:\n"
