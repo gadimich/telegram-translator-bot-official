@@ -145,12 +145,25 @@ async def init_db(pool: asyncpg.Pool) -> None:
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS target_lang TEXT")
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS plan_until TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS first_name TEXT")
+        await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS usage (
-                user_id BIGINT,
-                period  TEXT,
-                count   INT DEFAULT 0,
+                user_id  BIGINT,
+                period   TEXT,
+                count    INT DEFAULT 0,
+                cost_usd REAL DEFAULT 0,
                 PRIMARY KEY (user_id, period)
+            )
+        """)
+        await conn.execute("ALTER TABLE usage ADD COLUMN IF NOT EXISTS cost_usd REAL DEFAULT 0")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id       SERIAL PRIMARY KEY,
+                user_id  BIGINT,
+                plan     TEXT,
+                stars    INT,
+                paid_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
@@ -214,14 +227,32 @@ async def get_message_count(pool: asyncpg.Pool, user_id: int) -> int:
     return row["count"] if row else 0
 
 
-async def increment_usage(pool: asyncpg.Pool, user_id: int) -> None:
+async def increment_usage(pool: asyncpg.Pool, user_id: int, cost_usd: float = 0.0) -> None:
     from datetime import datetime
     period = datetime.utcnow().strftime("%Y-%m")
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO usage (user_id, period, count) VALUES ($1, $2, 1)
-            ON CONFLICT (user_id, period) DO UPDATE SET count = usage.count + 1
-        """, user_id, period)
+            INSERT INTO usage (user_id, period, count, cost_usd) VALUES ($1, $2, 1, $3)
+            ON CONFLICT (user_id, period) DO UPDATE
+                SET count = usage.count + 1, cost_usd = usage.cost_usd + $3
+        """, user_id, period, cost_usd)
+
+
+async def update_user_info(pool: asyncpg.Pool, user_id: int, first_name: str | None, username: str | None) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_prefs (user_id, first_name, username, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET first_name = $2, username = $3
+        """, user_id, first_name, username)
+
+
+async def record_payment(pool: asyncpg.Pool, user_id: int, plan: str, stars: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO payments (user_id, plan, stars) VALUES ($1, $2, $3)",
+            user_id, plan, stars,
+        )
 
 
 # ---------- UI string helpers ----------
@@ -281,7 +312,7 @@ async def transcribe(audio_path: Path, hint: str | None = None) -> tuple[str, st
     return text, lang
 
 
-async def translate(text: str, src: str, tgt: str) -> str:
+async def translate(text: str, src: str, tgt: str) -> tuple[str, int, int]:
     src_name = SUPPORTED.get(src, {}).get("name", src)
     tgt_name = SUPPORTED.get(tgt, {}).get("name", tgt)
     log.info("Translating %s -> %s ...", src_name, tgt_name)
@@ -303,7 +334,9 @@ async def translate(text: str, src: str, tgt: str) -> str:
     )
     result = resp.choices[0].message.content.strip()
     log.info("Translation: %s", result)
-    return result
+    in_tok  = resp.usage.prompt_tokens     if resp.usage else 0
+    out_tok = resp.usage.completion_tokens if resp.usage else 0
+    return result, in_tok, out_tok
 
 
 async def synthesize(text: str, out_path: Path) -> Path:
@@ -320,6 +353,7 @@ async def synthesize(text: str, out_path: Path) -> Path:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
+    await update_user_info(pool, user.id, user.first_name, user.username)
     src, tgt = await get_user_prefs(pool, user.id)
 
     detected = _tg_lang(user)
@@ -482,8 +516,11 @@ async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     pool: asyncpg.Pool = context.bot_data["pool"]
-    plan = msg.successful_payment.invoice_payload  # "basic" or "pro"
+    plan  = msg.successful_payment.invoice_payload  # "basic" or "pro"
+    stars = msg.successful_payment.total_amount
     await set_plan(pool, msg.from_user.id, plan)
+    await record_payment(pool, msg.from_user.id, plan, stars)
+    await update_user_info(pool, msg.from_user.id, msg.from_user.first_name, msg.from_user.username)
     s = await _strings_for(pool, msg.from_user.id)
     from datetime import datetime, timedelta
     expiry = (datetime.utcnow() + timedelta(days=30)).strftime("%b %-d")
@@ -506,6 +543,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not (msg.voice or msg.audio):
         return
 
+    await update_user_info(pool, user.id, user.first_name, user.username)
     src, tgt = await get_user_prefs(pool, user.id)
     s = await _strings_for(pool, user.id)
 
@@ -555,8 +593,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await status.edit_text(s["no_speech"])
                 return
 
-            translation = await translate(transcript, src_lang, tgt)
+            translation, in_tok, out_tok = await translate(transcript, src_lang, tgt)
             await synthesize(translation, out_path)
+
+            whisper_cost = duration * 0.006 / 60
+            gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
+            tts_cost     = len(translation) * 15.0 / 1_000_000
+            total_cost   = whisper_cost + gpt_cost + tts_cost
 
             target_chat = FORWARD_TO if FORWARD_TO else msg.chat_id
 
@@ -573,7 +616,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
             await status.delete()
-            await increment_usage(pool, user.id)
+            await increment_usage(pool, user.id, total_cost)
 
             if FORWARD_TO and str(target_chat) != str(msg.chat_id):
                 await msg.reply_text(f"✅ Sent to {FORWARD_TO}")
@@ -606,10 +649,22 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ---------- Lifecycle ----------
 async def post_init(application: Application) -> None:
+    import asyncio
+    import uvicorn
+    from dashboard import app as dash_app
+
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"])
     await init_db(pool)
     application.bot_data["pool"] = pool
     log.info("DB pool ready")
+
+    dash_app.state.pool = pool
+    port = int(os.getenv("PORT", "8080"))
+    config = uvicorn.Config(dash_app, host="0.0.0.0", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None  # let PTB own the signals
+    asyncio.create_task(server.serve())
+    log.info("Dashboard listening on port %d", port)
 
 
 async def post_shutdown(application: Application) -> None:
