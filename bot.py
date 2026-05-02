@@ -1,11 +1,11 @@
 """
-Telegram Voice Translator Bot (bidirectional EN <-> ES)
--------------------------------------------------------
-Each user sets their source language once with /setlang en or /setlang es.
-The bot then translates voice messages to the opposite language and
-replies with a voice message in that language.
+Telegram Voice Translator Bot
+------------------------------
+Each user sets their target language (what they want translations in).
+Source language is auto-detected by Whisper, and optionally inferred from
+the user's Telegram language setting for UI localisation.
 
-Pipeline: Telegram Bot API -> Whisper -> GPT-4o-mini -> OpenAI TTS
+Pipeline: Telegram voice -> Whisper -> GPT-4o-mini -> TTS -> voice reply
 """
 
 from __future__ import annotations
@@ -16,17 +16,20 @@ import tempfile
 from pathlib import Path
 
 import asyncpg
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+
+from strings import get_strings, UI_STRINGS
 
 # ---------- Setup ----------
 load_dotenv()
@@ -41,23 +44,75 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 FORWARD_TO = os.getenv("FORWARD_TO", "").strip()
-
 ALLOWED_USERS = {
     int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()
 }
-
 TTS_VOICE = os.getenv("TTS_VOICE", "alloy")
-DEFAULT_SOURCE = os.getenv("DEFAULT_SOURCE_LANG", "en")
 
 # ---------- Language config ----------
-SUPPORTED = {
-    "en": {"name": "English", "flag": "🇬🇧"},
-    "es": {"name": "Spanish", "flag": "🇪🇸"},
+SUPPORTED: dict[str, dict] = {
+    "en": {"name": "English",    "flag": "🇬🇧"},
+    "es": {"name": "Spanish",    "flag": "🇪🇸"},
+    "fr": {"name": "French",     "flag": "🇫🇷"},
+    "de": {"name": "German",     "flag": "🇩🇪"},
+    "pt": {"name": "Portuguese", "flag": "🇵🇹"},
+    "it": {"name": "Italian",    "flag": "🇮🇹"},
+    "ru": {"name": "Russian",    "flag": "🇷🇺"},
+    "zh": {"name": "Chinese",    "flag": "🇨🇳"},
+    "ja": {"name": "Japanese",   "flag": "🇯🇵"},
+    "ko": {"name": "Korean",     "flag": "🇰🇷"},
+    "ar": {"name": "Arabic",     "flag": "🇸🇦"},
+    "hi": {"name": "Hindi",      "flag": "🇮🇳"},
+    "tr": {"name": "Turkish",    "flag": "🇹🇷"},
+    "pl": {"name": "Polish",     "flag": "🇵🇱"},
+    "nl": {"name": "Dutch",      "flag": "🇳🇱"},
+    "uk": {"name": "Ukrainian",  "flag": "🇺🇦"},
+    "he": {"name": "Hebrew",     "flag": "🇮🇱"},
+    "fa": {"name": "Persian",    "flag": "🇮🇷"},
+    "id": {"name": "Indonesian", "flag": "🇮🇩"},
+    "vi": {"name": "Vietnamese", "flag": "🇻🇳"},
+}
+
+WHISPER_TO_CODE: dict[str, str] = {
+    "english": "en",    "spanish": "es",    "french": "fr",
+    "german": "de",     "portuguese": "pt", "italian": "it",
+    "russian": "ru",    "chinese": "zh",    "japanese": "ja",
+    "korean": "ko",     "arabic": "ar",     "hindi": "hi",
+    "turkish": "tr",    "polish": "pl",     "dutch": "nl",
+    "ukrainian": "uk",  "hebrew": "he",     "persian": "fa",
+    "indonesian": "id", "vietnamese": "vi",
+    **{code: code for code in SUPPORTED},
 }
 
 
-def opposite(lang: str) -> str:
-    return "es" if lang == "en" else "en"
+def lang_label(code: str) -> str:
+    info = SUPPORTED.get(code, {})
+    return f"{info.get('flag', '🌐')} {info.get('name', code)}"
+
+
+# ---------- Keyboards ----------
+def lang_keyboard(prefix: str, exclude: str | None = None) -> InlineKeyboardMarkup:
+    codes = [c for c in SUPPORTED if c != exclude]
+    buttons = [
+        InlineKeyboardButton(lang_label(c), callback_data=f"{prefix}{c}")
+        for c in codes
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(rows)
+
+
+def target_keyboard(s: dict, exclude: str | None = None, source_btn: str | None = None) -> InlineKeyboardMarkup:
+    grid = list(lang_keyboard("tgt_", exclude=exclude).inline_keyboard)
+    if source_btn:
+        grid += [[InlineKeyboardButton(source_btn, callback_data="change_src")]]
+    return InlineKeyboardMarkup(grid)
+
+
+def settings_keyboard(s: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(s["change_source"], callback_data="change_src"),
+        InlineKeyboardButton(s["change_target"], callback_data="change_tgt"),
+    ]])
 
 
 # ---------- DB helpers ----------
@@ -66,21 +121,24 @@ async def init_db(pool: asyncpg.Pool) -> None:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_prefs (
                 user_id     BIGINT PRIMARY KEY,
-                source_lang TEXT NOT NULL,
+                source_lang TEXT,
+                target_lang TEXT,
                 updated_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute("ALTER TABLE user_prefs ALTER COLUMN source_lang DROP NOT NULL")
+        await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS target_lang TEXT")
 
 
-async def get_user_lang(pool: asyncpg.Pool, user_id: int) -> str | None:
+async def get_user_prefs(pool: asyncpg.Pool, user_id: int) -> tuple[str | None, str | None]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT source_lang FROM user_prefs WHERE user_id = $1", user_id
+            "SELECT source_lang, target_lang FROM user_prefs WHERE user_id = $1", user_id
         )
-    return row["source_lang"] if row else None
+    return (row["source_lang"], row["target_lang"]) if row else (None, None)
 
 
-async def set_user_lang(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
+async def set_user_source(pool: asyncpg.Pool, user_id: int, lang: str | None) -> None:
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO user_prefs (user_id, source_lang, updated_at)
@@ -89,46 +147,56 @@ async def set_user_lang(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
         """, user_id, lang)
 
 
-async def clear_user_lang(pool: asyncpg.Pool, user_id: int) -> None:
+async def set_user_target(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM user_prefs WHERE user_id = $1", user_id)
+        await conn.execute("""
+            INSERT INTO user_prefs (user_id, target_lang, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET target_lang = $2, updated_at = NOW()
+        """, user_id, lang)
+
+
+# ---------- UI string helpers ----------
+def _tg_lang(user) -> str | None:
+    code = (user.language_code or "").split("-")[0].lower()
+    return code if code in SUPPORTED else None
+
+
+async def _strings(lang: str) -> dict[str, str]:
+    lang_name = SUPPORTED.get(lang, SUPPORTED["en"])["name"]
+    return await get_strings(lang, lang_name, openai_client)
+
+
+async def _strings_for(pool: asyncpg.Pool, user_id: int) -> dict[str, str]:
+    src, _ = await get_user_prefs(pool, user_id)
+    return await _strings(src or "en")
 
 
 # ---------- Pipeline ----------
-WHISPER_TO_CODE = {"spanish": "es", "español": "es", "es": "es",
-                   "english": "en", "en": "en"}
-
-
 async def transcribe(audio_path: Path, hint: str | None = None) -> tuple[str, str]:
-    if hint:
+    if hint and hint in SUPPORTED:
         log.info("Transcribing %s (lang=%s, user-set)...", audio_path.name, hint)
         with open(audio_path, "rb") as f:
             resp = await openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                language=hint,
+                model="whisper-1", file=f, language=hint,
             )
-        text = resp.text.strip()
-        log.info("Transcript: %s", text)
-        return text, hint
+        return resp.text.strip(), hint
 
     log.info("Transcribing %s (auto-detect)...", audio_path.name)
     with open(audio_path, "rb") as f:
         resp = await openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            response_format="verbose_json",
+            model="whisper-1", file=f, response_format="verbose_json",
         )
     text = resp.text.strip()
     detected = (resp.language or "").lower()
     lang = WHISPER_TO_CODE.get(detected, "en")
-    log.info("Whisper detected %r -> %s | Transcript: %s", detected, lang, text)
+    log.info("Whisper detected %r -> %s | %s", detected, lang, text)
     return text, lang
 
 
-async def translate(text: str, source_lang: str, target_lang: str) -> str:
-    src_name = SUPPORTED[source_lang]["name"]
-    tgt_name = SUPPORTED[target_lang]["name"]
+async def translate(text: str, src: str, tgt: str) -> str:
+    src_name = SUPPORTED.get(src, {}).get("name", src)
+    tgt_name = SUPPORTED.get(tgt, {}).get("name", tgt)
     log.info("Translating %s -> %s ...", src_name, tgt_name)
     resp = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
@@ -138,27 +206,23 @@ async def translate(text: str, source_lang: str, target_lang: str) -> str:
                 "content": (
                     f"You are a professional translator. Translate the user's "
                     f"{src_name} text to natural, conversational {tgt_name}. "
-                    "Preserve tone and register (casual stays casual, formal "
-                    "stays formal). Output ONLY the translation — no quotes, "
-                    "no commentary, no explanations."
+                    "Preserve tone and register. "
+                    "Output ONLY the translation — no quotes, no commentary."
                 ),
             },
             {"role": "user", "content": text},
         ],
         temperature=0.3,
     )
-    translated = resp.choices[0].message.content.strip()
-    log.info("Translation: %s", translated)
-    return translated
+    result = resp.choices[0].message.content.strip()
+    log.info("Translation: %s", result)
+    return result
 
 
 async def synthesize(text: str, out_path: Path) -> Path:
-    log.info("Synthesizing speech ...")
+    log.info("Synthesizing speech...")
     resp = await openai_client.audio.speech.create(
-        model="tts-1",
-        voice=TTS_VOICE,
-        input=text,
-        response_format="opus",
+        model="tts-1", voice=TTS_VOICE, input=text, response_format="opus",
     )
     out_path.write_bytes(resp.content)
     log.info("Wrote %s (%d bytes)", out_path.name, out_path.stat().st_size)
@@ -169,81 +233,139 @@ async def synthesize(text: str, out_path: Path) -> Path:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
-    lang = await get_user_lang(pool, user.id)
-    if lang:
-        tgt = opposite(lang)
-        mode = (f"Fixed: {SUPPORTED[lang]['flag']} {SUPPORTED[lang]['name']} "
-                f"→ {SUPPORTED[tgt]['flag']} {SUPPORTED[tgt]['name']}\n"
-                "Run /setlang to change or /setlang clear to auto-detect.")
+    src, tgt = await get_user_prefs(pool, user.id)
+
+    detected = _tg_lang(user)
+    ui_lang = src or detected or "en"
+    s = await _strings(ui_lang)
+
+    if tgt:
+        # Setup complete — show status and settings
+        src_label = lang_label(src) if src and src in SUPPORTED else "🔄 Auto-detect"
+        await update.message.reply_text(
+            s["welcome_back"].format(
+                name=user.first_name, src=src_label, tgt=lang_label(tgt)
+            ),
+            reply_markup=settings_keyboard(s),
+        )
+        return
+
+    # Save detected source lang if not already set
+    if detected and not src:
+        await set_user_source(pool, user.id, detected)
+        ui_lang = detected
+
+    if detected:
+        prompt = s["detected_lang_prompt"].format(lang=lang_label(ui_lang))
+        src_btn = s["dont_speak"].format(lang=SUPPORTED[ui_lang]["name"])
+        kb = target_keyboard(s, exclude=ui_lang, source_btn=src_btn)
     else:
-        mode = "Auto-detect (I'll figure out the language from your voice).\nRun /setlang en or /setlang es to fix it."
+        prompt = s["unknown_lang_prompt"]
+        kb = target_keyboard(s, source_btn=s["set_source"])
+
     await update.message.reply_text(
-        f"¡Hola / Hello {user.first_name}! 👋\n\n"
-        "Send me a voice message and I'll translate it.\n\n"
-        f"<b>Mode:</b> {mode}\n\n"
-        f"Your Telegram user ID: <code>{user.id}</code>",
-        parse_mode="HTML",
+        f"{s['welcome_new'].format(name=user.first_name)}\n\n{prompt}",
+        reply_markup=kb,
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Send me a voice message — I'll translate it to the other language "
-        "and reply with a voice message.\n\n"
-        "Commands:\n"
-        "/start – greeting + current mode\n"
-        "/setlang en | es – fix the language you speak (skips auto-detect)\n"
-        "/setlang clear – go back to auto-detect\n"
-        "/lang – show your current setting\n"
-        "/help – this message"
-    )
-
-
-async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
-    args = context.args or []
-    arg = args[0].lower() if args else ""
-
-    if arg in ("clear", "auto", ""):
-        await clear_user_lang(pool, user.id)
-        await update.message.reply_text("✅ Cleared — I'll auto-detect your language from now on.")
-        return
-
-    if arg not in SUPPORTED:
-        await update.message.reply_text(
-            "Usage:\n"
-            "/setlang en — you speak English\n"
-            "/setlang es — you speak Spanish\n"
-            "/setlang clear — back to auto-detect"
-        )
-        return
-
-    await set_user_lang(pool, user.id, arg)
-    tgt = opposite(arg)
-    await update.message.reply_text(
-        f"✅ Fixed to:\n"
-        f"<b>{SUPPORTED[arg]['flag']} {SUPPORTED[arg]['name']} "
-        f"→ {SUPPORTED[tgt]['flag']} {SUPPORTED[tgt]['name']}</b>\n\n"
-        "Run /setlang clear to go back to auto-detect.",
-        parse_mode="HTML",
-    )
+    s = await _strings_for(pool, update.effective_user.id)
+    await update.message.reply_text(s["help_text"])
 
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
-    lang = await get_user_lang(pool, user.id)
-    if lang:
-        tgt = opposite(lang)
-        text = (f"<b>{SUPPORTED[lang]['flag']} {SUPPORTED[lang]['name']} "
-                f"→ {SUPPORTED[tgt]['flag']} {SUPPORTED[tgt]['name']}</b> (fixed)\n\n"
-                "Run /setlang clear to switch to auto-detect.")
+    user = update.effective_user
+    src, tgt = await get_user_prefs(pool, user.id)
+    s = await _strings_for(pool, user.id)
+
+    if tgt:
+        src_label = lang_label(src) if src and src in SUPPORTED else "🔄 Auto-detect"
+        await update.message.reply_text(
+            s["current_settings"].format(src=src_label, tgt=lang_label(tgt)),
+            reply_markup=settings_keyboard(s),
+        )
+    elif src:
+        await update.message.reply_text(
+            s["what_translate_to"],
+            reply_markup=target_keyboard(s, exclude=src),
+        )
     else:
-        text = "<b>Auto-detect</b> — I detect your language from each voice message.\n\nRun /setlang en or /setlang es to fix it."
-    await update.message.reply_text(text, parse_mode="HTML")
+        await update.message.reply_text(
+            s["what_do_you_speak"],
+            reply_markup=lang_keyboard("src_"),
+        )
 
 
+async def setlang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await lang_cmd(update, context)
+
+
+# ---------- Callbacks ----------
+async def src_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    lang = query.data[4:]  # strip "src_"
+    pool: asyncpg.Pool = context.bot_data["pool"]
+
+    await set_user_source(pool, query.from_user.id, lang)
+    s = await _strings(lang)
+
+    await query.edit_message_text(
+        s["what_translate_to"],
+        reply_markup=target_keyboard(s, exclude=lang),
+    )
+
+
+async def tgt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    tgt = query.data[4:]  # strip "tgt_"
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    user = query.from_user
+
+    await set_user_target(pool, user.id, tgt)
+    src, _ = await get_user_prefs(pool, user.id)
+
+    ui_lang = src or "en"
+    s = await _strings(ui_lang)
+
+    src_label = lang_label(src) if src and src in SUPPORTED else "?"
+    await query.edit_message_text(
+        s["all_set"].format(src=src_label, tgt=lang_label(tgt))
+    )
+
+
+async def change_src_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    s = await _strings_for(pool, query.from_user.id)
+
+    await query.edit_message_text(
+        s["what_do_you_speak"],
+        reply_markup=lang_keyboard("src_"),
+    )
+
+
+async def change_tgt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    user = query.from_user
+
+    src, _ = await get_user_prefs(pool, user.id)
+    s = await _strings_for(pool, user.id)
+
+    await query.edit_message_text(
+        s["what_translate_to"],
+        reply_markup=lang_keyboard("tgt_", exclude=src),
+    )
+
+
+# ---------- Voice handler ----------
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     user = update.effective_user
@@ -251,28 +373,29 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if ALLOWED_USERS and user.id not in ALLOWED_USERS:
         log.warning("Unauthorized user %s (%s)", user.id, user.username)
-        await msg.reply_text(
-            "Sorry, this bot is private. Ask the owner to add your user ID."
-        )
+        s = await _strings_for(pool, user.id)
+        await msg.reply_text(s["private_bot"])
         return
 
     if not (msg.voice or msg.audio):
-        await msg.reply_text("Please send a voice message (hold the mic button).")
+        return
+
+    src, tgt = await get_user_prefs(pool, user.id)
+    s = await _strings_for(pool, user.id)
+
+    if not tgt:
+        await msg.reply_text(s["setup_first"])
         return
 
     audio_obj = msg.voice or msg.audio
     duration = getattr(audio_obj, "duration", 0)
-
     log.info("Voice from %s (%s): %ds", user.username or user.first_name, user.id, duration)
 
-    MAX_SECONDS = 300
-    if duration > MAX_SECONDS:
-        await msg.reply_text(
-            f"That's {duration}s — please keep messages under {MAX_SECONDS}s."
-        )
+    if duration > 300:
+        await msg.reply_text(s["too_long"].format(duration=duration))
         return
 
-    status = await msg.reply_text("🎧 Translating...")
+    status = await msg.reply_text(s["translating"])
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -283,19 +406,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             tg_file = await audio_obj.get_file()
             await tg_file.download_to_drive(custom_path=str(in_path))
 
-            hint = await get_user_lang(pool, user.id)
-            transcript, src_lang = await transcribe(in_path, hint=hint)
-            tgt_lang = opposite(src_lang)
-            log.info("%s -> %s", src_lang, tgt_lang)
-            await status.edit_text(
-                f"🎧 Translating {SUPPORTED[src_lang]['flag']} → {SUPPORTED[tgt_lang]['flag']}..."
-            )
+            transcript, src_lang = await transcribe(in_path, hint=src)
+            log.info("%s -> %s", src_lang, tgt)
+
+            src_flag = SUPPORTED.get(src_lang, {}).get("flag", "🌐")
+            tgt_flag = SUPPORTED.get(tgt, {}).get("flag", "🌐")
+            await status.edit_text(s["translating_langs"].format(src=src_flag, tgt=tgt_flag))
 
             if not transcript:
-                await status.edit_text("Couldn't hear any speech in that. Try again?")
+                await status.edit_text(s["no_speech"])
                 return
 
-            translation = await translate(transcript, src_lang, tgt_lang)
+            translation = await translate(transcript, src_lang, tgt)
             await synthesize(translation, out_path)
 
             target_chat = FORWARD_TO if FORWARD_TO else msg.chat_id
@@ -305,12 +427,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             await context.bot.send_message(
                 chat_id=target_chat,
-                text=f"{SUPPORTED[src_lang]['flag']} {transcript}",
+                text=f"{src_flag} {transcript}",
             )
-
             await context.bot.send_message(
                 chat_id=target_chat,
-                text=f"{SUPPORTED[tgt_lang]['flag']} {translation}",
+                text=f"{tgt_flag} {translation}",
             )
 
             await status.delete()
@@ -320,13 +441,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         except Exception as e:
             log.exception("Pipeline failed")
-            await status.edit_text(f"⚠️ Something broke: {type(e).__name__}")
+            await status.edit_text(s["error"].format(error=type(e).__name__))
 
 
 # ---------- Error handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
-        log.warning("Conflict during redeploy — another instance was shutting down, ignoring")
+        log.warning("Conflict during redeploy — ignoring")
         return
     log.exception("Unhandled error: %s", context.error)
 
@@ -358,14 +479,17 @@ def main() -> None:
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("setlang", setlang))
     app.add_handler(CommandHandler("lang", lang_cmd))
+    app.add_handler(CommandHandler("setlang", setlang))
+    app.add_handler(CallbackQueryHandler(src_callback,        pattern="^src_"))
+    app.add_handler(CallbackQueryHandler(tgt_callback,        pattern="^tgt_"))
+    app.add_handler(CallbackQueryHandler(change_src_callback, pattern="^change_src$"))
+    app.add_handler(CallbackQueryHandler(change_tgt_callback, pattern="^change_tgt$"))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     log.info("Bot starting. Allowed users: %s",
              ALLOWED_USERS if ALLOWED_USERS else "ANYONE (open)")
     log.info("Forward target: %s", FORWARD_TO if FORWARD_TO else "reply to sender")
-    log.info("Default source language: %s", DEFAULT_SOURCE)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
