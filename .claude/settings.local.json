@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(railway link *)",
+      "Bash(railway logs *)",
+      "Bash(pkill -f \"python bot.py\")",
+      "Read(//Users/gadimichaeli/projects/**)",
+      "Bash(gh repo *)"
+    ]
+  }
+}
