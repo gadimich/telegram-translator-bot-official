@@ -48,6 +48,8 @@ UI_STRINGS: dict[str, str] = {
         "/start – greeting + setup\n"
         "/lang – show or change your language settings\n"
         "/balance – view your plan and remaining messages\n"
+        "/forward – set up auto-forwarding to a paired person (Basic / Pro)\n"
+        "/unforward – remove the forwarding pair\n"
         "/terms – read our Terms of Service\n"
         "/support – contact us for help\n"
         "/paysupport – payment and subscription support\n"
@@ -72,6 +74,35 @@ UI_STRINGS: dict[str, str] = {
         "Subscriptions are paid via Telegram Stars and don't auto-renew — they expire at the end of the billing period.\n\n"
         "Refund policy: refunds may be issued at our discretion within 7 days of purchase in cases of service unavailability or billing error. See https://tryrespeak.com/terms for details."
     ),
+    # Forward feature (auto-forward voice messages to a paired recipient)
+    "forward_paid_only": "Auto-forwarding is a Basic and Pro feature. Upgrade to send your voice messages directly to a specific person.",
+    "forward_no_pair": "You don't have a forwarding pair set up yet. Use /forward setup to create one.",
+    "forward_setup_link": "Share this link with the person who should receive your translated voice messages:\n\n{link}\n\nThe link expires in 72 hours. Once they accept, your voice messages will be auto-forwarded to them in their language.",
+    "forward_pending": "You have a pending invite. Share this link with them:\n\n{link}\n\nWaiting for them to accept.",
+    "forward_active_status": "✅ Forwarding active to {name}.\n\nVoice messages you send are auto-translated to {lang} and delivered to them. They can reply by tapping & holding your message → Reply.\n\n/forward pause — temporarily stop\n/unforward — remove the pair",
+    "forward_paused_status": "⏸ Forwarding paused.\n\n/forward resume — re-enable\n/unforward — remove the pair",
+    "forward_pause_done": "Forwarding paused. Voice messages will translate normally for now. Use /forward resume to re-enable.",
+    "forward_resume_done": "Forwarding resumed. Voice messages will be sent to {name}.",
+    "forward_resume_no_pair": "Nothing to resume. Use /forward setup to create a pair.",
+    "unforward_done": "Unpaired from {name}. They've been notified.",
+    "unforward_no_pair": "You don't have an active forwarding pair.",
+    "pair_invite_received": "{sender_name} wants to send you translated voice messages via Respeak.\n\nYou'll receive their messages in {lang}. To reply, tap & hold their message → Reply → record your voice. Your reply will auto-translate back to them.\n\nAccept?",
+    "pair_invite_lang_prompt": "{sender_name} wants to send you translated voice messages. First — what language do you speak?",
+    "pair_invite_expired": "This invite has expired or is no longer valid. Ask {sender_name} for a fresh pairing link.",
+    "pair_invite_already_active": "You're already paired with this person.",
+    "pair_accept_btn": "✅ Accept",
+    "pair_decline_btn": "❌ Decline",
+    "pair_accepted_to_sender": "✅ {recipient_name} accepted! Your voice messages will now auto-forward to them in {lang}.",
+    "pair_accepted_to_recipient": "✅ Paired with {sender_name}. Their voice messages will arrive in {lang}.\n\nTo reply: tap & hold their message → Reply → send your voice. Your reply will translate back to {sender_lang} for them.",
+    "pair_declined_to_sender": "{recipient_name} declined the pairing.",
+    "pair_decline_done": "Declined.",
+    "unforward_recipient_notice": "❌ {sender_name} has unpaired from you. Their voice messages will no longer arrive here.",
+    "forward_confirm_to_sender": "✓ Forwarded to {name}",
+    "forward_undo_btn": "↩️ Undo",
+    "forward_undo_done": "Forward undone.",
+    "forward_undo_too_late": "Too late to undo this one.",
+    "forward_failed_blocked": "⚠️ Couldn't forward to {name} — they may have blocked the bot. Use /unforward to remove the pairing.",
+    "forward_failed_quota": "⚠️ Couldn't forward — your monthly limit reached. Upgrade or wait for next month.",
 }
 
 # Content hash of UI_STRINGS — when developer changes any value or key, this changes,
