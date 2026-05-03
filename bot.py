@@ -395,6 +395,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(s["help_text"])
 
 
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    s = await _strings_for(pool, update.effective_user.id)
+    await update.message.reply_text(s["support_text"], disable_web_page_preview=True)
+
+
+async def terms_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    s = await _strings_for(pool, update.effective_user.id)
+    await update.message.reply_text(s["terms_text"], disable_web_page_preview=True)
+
+
+async def paysupport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    s = await _strings_for(pool, update.effective_user.id)
+    await update.message.reply_text(s["paysupport_text"], disable_web_page_preview=True)
+
+
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pool: asyncpg.Pool = context.bot_data["pool"]
     user = update.effective_user
@@ -494,7 +512,10 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     plan = query.data[4:]  # "basic" or "pro"
     stars = PLAN_STARS[plan]
     title = "Basic Plan" if plan == "basic" else "Pro Plan"
-    description = "100 messages per month" if plan == "basic" else "Unlimited messages per month"
+    plan_desc = "100 messages per month" if plan == "basic" else "Unlimited messages per month"
+    # Terms reference appended so the user explicitly accepts by tapping Pay
+    # (Telegram Stars policy requires confirmation that user has read T&Cs).
+    description = f"{plan_desc}. Tap Pay to agree to our Terms: tryrespeak.com/terms"
     try:
         await context.bot.send_invoice(
             chat_id=query.from_user.id,
@@ -686,6 +707,9 @@ def main() -> None:
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("support", support_cmd))
+    app.add_handler(CommandHandler("terms", terms_cmd))
+    app.add_handler(CommandHandler("paysupport", paysupport_cmd))
     app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("setlang", setlang))
     app.add_handler(CommandHandler("balance", balance_cmd))

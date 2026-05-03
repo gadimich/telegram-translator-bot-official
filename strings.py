@@ -38,7 +38,30 @@ UI_STRINGS: dict[str, str] = {
         "Commands:\n"
         "/start – greeting + setup\n"
         "/lang – show or change your language settings\n"
+        "/balance – view your plan and remaining messages\n"
+        "/terms – read our Terms of Service\n"
+        "/support – contact us for help\n"
+        "/paysupport – payment and subscription support\n"
         "/help – this message"
+    ),
+    "support_text": (
+        "💬 Need help?\n\n"
+        "Email: info@tryrespeak.com\n"
+        "Website: https://tryrespeak.com\n\n"
+        "We respond within one business day. For payment or subscription issues, use /paysupport."
+    ),
+    "terms_text": (
+        "📄 Terms of Service\n\n"
+        "Read the full terms at https://tryrespeak.com/terms\n\n"
+        "Privacy Policy: https://tryrespeak.com/privacy\n\n"
+        "By using Respeak you agree to these terms."
+    ),
+    "paysupport_text": (
+        "💳 Payment support\n\n"
+        "For any payment or subscription issue, contact us at info@tryrespeak.com — we handle all payment questions and refund requests directly.\n\n"
+        "⚠️ Telegram support cannot help with bot payments. All payment issues must go through us.\n\n"
+        "Subscriptions are paid via Telegram Stars and don't auto-renew — they expire at the end of the billing period.\n\n"
+        "Refund policy: refunds may be issued at our discretion within 7 days of purchase in cases of service unavailability or billing error. See https://tryrespeak.com/terms for details."
     ),
 }
 
