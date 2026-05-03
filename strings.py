@@ -1,8 +1,17 @@
-"""UI string translations with lazy GPT caching."""
+"""UI string translations with PostgreSQL-backed cache.
+
+The cache key includes a hash of UI_STRINGS content, so when the developer
+edits UI_STRINGS (adds/removes/changes a key), every language's cache entry
+becomes invalid automatically — the next user request triggers a fresh
+translation. Old rows are upserted in place, no cleanup needed.
+"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+
+import asyncpg
 
 log = logging.getLogger("voice-translator")
 
@@ -65,14 +74,44 @@ UI_STRINGS: dict[str, str] = {
     ),
 }
 
+# Content hash of UI_STRINGS — when developer changes any value or key, this changes,
+# and any DB rows with the old hash are bypassed (treated as cache misses).
+_UI_HASH = hashlib.sha256(
+    json.dumps(UI_STRINGS, sort_keys=True, ensure_ascii=False).encode("utf-8")
+).hexdigest()[:16]
+
+# Process-local cache. Avoids DB roundtrip for repeat requests within one process.
+# Wiped on every restart, then warmed from DB or fresh translation.
 _cache: dict[str, dict[str, str]] = {"en": UI_STRINGS}
 
 
-async def get_strings(lang: str, lang_name: str, client) -> dict[str, str]:
+async def get_strings(
+    lang: str,
+    lang_name: str,
+    client,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, str]:
     if lang in _cache:
         return _cache[lang]
 
-    log.info("Translating UI strings to %s...", lang_name)
+    # Try persistent cache (skipped if no pool, e.g. during early startup).
+    if pool is not None:
+        try:
+            row = await pool.fetchrow(
+                "SELECT strings FROM ui_strings_cache WHERE lang = $1 AND hash = $2",
+                lang,
+                _UI_HASH,
+            )
+            if row:
+                cached = json.loads(row["strings"])
+                strings = {k: cached.get(k, UI_STRINGS[k]) for k in UI_STRINGS}
+                _cache[lang] = strings
+                log.info("UI strings loaded from DB cache for %s (hash=%s)", lang_name, _UI_HASH)
+                return strings
+        except Exception as e:
+            log.warning("DB cache lookup failed for %s, will translate fresh: %s", lang_name, e)
+
+    log.info("Translating UI strings to %s (hash=%s)...", lang_name, _UI_HASH)
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -90,8 +129,23 @@ async def get_strings(lang: str, lang_name: str, client) -> dict[str, str]:
         response_format={"type": "json_object"},
     )
     translated = json.loads(resp.choices[0].message.content)
-    # Fall back to English for any missing keys
     strings = {k: translated.get(k, UI_STRINGS[k]) for k in UI_STRINGS}
     _cache[lang] = strings
-    log.info("UI strings cached for %s", lang_name)
+
+    if pool is not None:
+        try:
+            await pool.execute(
+                """
+                INSERT INTO ui_strings_cache (lang, hash, strings, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (lang) DO UPDATE SET hash = $2, strings = $3, updated_at = NOW()
+                """,
+                lang,
+                _UI_HASH,
+                json.dumps(strings, ensure_ascii=False),
+            )
+            log.info("UI strings persisted to DB for %s", lang_name)
+        except Exception as e:
+            log.warning("DB cache write failed for %s: %s", lang_name, e)
+
     return strings

@@ -166,6 +166,14 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 paid_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ui_strings_cache (
+                lang        TEXT PRIMARY KEY,
+                hash        TEXT NOT NULL,
+                strings     TEXT NOT NULL,
+                updated_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
 
 async def get_user_prefs(pool: asyncpg.Pool, user_id: int) -> tuple[str | None, str | None]:
@@ -261,14 +269,14 @@ def _tg_lang(user) -> str | None:
     return code if code in SUPPORTED else None
 
 
-async def _strings(lang: str) -> dict[str, str]:
+async def _strings(pool: asyncpg.Pool, lang: str) -> dict[str, str]:
     lang_name = SUPPORTED.get(lang, SUPPORTED["en"])["name"]
-    return await get_strings(lang, lang_name, openai_client)
+    return await get_strings(lang, lang_name, openai_client, pool)
 
 
 async def _strings_for(pool: asyncpg.Pool, user_id: int) -> dict[str, str]:
     src, _ = await get_user_prefs(pool, user_id)
-    return await _strings(src or "en")
+    return await _strings(pool, src or "en")
 
 
 async def _plan_status(pool: asyncpg.Pool, user_id: int, s: dict) -> str:
@@ -358,7 +366,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     detected = _tg_lang(user)
     ui_lang = src or detected or "en"
-    s = await _strings(ui_lang)
+    s = await _strings(pool, ui_lang)
 
     if tgt:
         src_label = lang_label(src) if src and src in SUPPORTED else "🔄 Auto-detect"
@@ -451,7 +459,7 @@ async def src_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     pool: asyncpg.Pool = context.bot_data["pool"]
 
     await set_user_source(pool, query.from_user.id, lang)
-    s = await _strings(lang)
+    s = await _strings(pool, lang)
 
     await query.edit_message_text(
         s["what_translate_to"],
@@ -470,7 +478,7 @@ async def tgt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     src, _ = await get_user_prefs(pool, user.id)
 
     ui_lang = src or "en"
-    s = await _strings(ui_lang)
+    s = await _strings(pool, ui_lang)
 
     src_label = lang_label(src) if src and src in SUPPORTED else "?"
     await query.edit_message_text(
