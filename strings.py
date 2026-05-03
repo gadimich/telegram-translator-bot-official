@@ -47,6 +47,7 @@ UI_STRINGS: dict[str, str] = {
         "Commands:\n"
         "/start – greeting + setup\n"
         "/lang – show or change your language settings\n"
+        "/voice – pick a voice (alloy or nova) for your translations\n"
         "/balance – view your plan and remaining messages\n"
         "/forward – set up auto-forwarding to a paired person (Basic / Pro)\n"
         "/unforward – remove the forwarding pair\n"
@@ -104,6 +105,15 @@ UI_STRINGS: dict[str, str] = {
     "forward_undo_too_late": "Too late to undo this one.",
     "forward_failed_blocked": "⚠️ Couldn't forward to {name} — they may have blocked the bot. Use /unforward to remove the pairing.",
     "forward_failed_quota": "⚠️ Couldn't forward — your monthly limit reached. Upgrade or wait for next month.",
+    # Voice picker
+    "voice_prompt": "🎙 Pick the voice your translations will sound like.\n\nListen to both previews below, then tap the one you want.",
+    "voice_label_alloy": "Alloy (neutral)",
+    "voice_label_nova": "Nova (warm)",
+    "voice_use_btn": "✓ Use this voice",
+    "voice_set_alloy": "✅ Voice set to Alloy. Send me a voice message to hear it.",
+    "voice_set_nova": "✅ Voice set to Nova. Send me a voice message to hear it.",
+    "voice_already_set_alloy": "✓ Already on Alloy.",
+    "voice_already_set_nova": "✓ Already on Nova.",
 }
 
 # Content hash of UI_STRINGS — when developer changes any value or key, this changes,

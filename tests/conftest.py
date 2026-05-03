@@ -283,8 +283,9 @@ def mock_translate(monkeypatch):
 
 @pytest.fixture
 def mock_synthesize(monkeypatch):
-    """Writes a stub byte to out_path so the open(...) call after it works."""
-    async def fake_synth(text, out_path):
+    """Writes a stub byte to out_path so the open(...) call after it works.
+    Accepts the optional voice parameter that production synthesize takes."""
+    async def fake_synth(text, out_path, voice="alloy"):
         out_path.write_bytes(b"AUDIO_STUB")
         return out_path
 
@@ -293,12 +294,19 @@ def mock_synthesize(monkeypatch):
 
 
 @pytest.fixture
+def mock_get_user_voice(monkeypatch):
+    mock = AsyncMock(return_value="alloy")
+    monkeypatch.setattr(bot, "get_user_voice", mock)
+    return mock
+
+
+@pytest.fixture
 def voice_pipeline(
     mock_transcribe, mock_translate, mock_synthesize,
     mock_increment_usage, mock_record_forward,
     mock_get_message_count, mock_get_plan, mock_get_user_prefs,
     mock_get_active_pair, mock_find_pair_by_replied,
-    mock_get_user_first_name, mock_update_user_info,
+    mock_get_user_first_name, mock_update_user_info, mock_get_user_voice,
 ):
     """Bundle of mocks needed for any handle_voice test. Pulls them all in
     so individual tests can request just `voice_pipeline` instead of
@@ -316,6 +324,7 @@ def voice_pipeline(
         "find_pair_by_replied": mock_find_pair_by_replied,
         "get_user_first_name": mock_get_user_first_name,
         "update_user_info": mock_update_user_info,
+        "get_user_voice": mock_get_user_voice,
     }
 
 

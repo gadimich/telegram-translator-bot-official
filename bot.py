@@ -147,6 +147,9 @@ async def init_db(pool: asyncpg.Pool) -> None:
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS plan_until TIMESTAMPTZ")
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS first_name TEXT")
         await conn.execute("ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS username TEXT")
+        await conn.execute(
+            "ALTER TABLE user_prefs ADD COLUMN IF NOT EXISTS voice TEXT DEFAULT 'alloy'"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS usage (
                 user_id  BIGINT,
@@ -236,6 +239,33 @@ async def set_user_target(pool: asyncpg.Pool, user_id: int, lang: str) -> None:
             VALUES ($1, $2, NOW())
             ON CONFLICT (user_id) DO UPDATE SET target_lang = $2, updated_at = NOW()
         """, user_id, lang)
+
+
+SUPPORTED_VOICES = {"alloy", "nova"}
+
+
+async def get_user_voice(pool: asyncpg.Pool, user_id: int) -> str:
+    """Return the user's chosen TTS voice. Falls back to the global default
+    (TTS_VOICE env var, default 'alloy') for users who haven't picked yet."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT voice FROM user_prefs WHERE user_id = $1", user_id
+        )
+    voice = row["voice"] if row and row["voice"] else None
+    if voice in SUPPORTED_VOICES:
+        return voice
+    return TTS_VOICE if TTS_VOICE in SUPPORTED_VOICES else "alloy"
+
+
+async def set_user_voice(pool: asyncpg.Pool, user_id: int, voice: str) -> None:
+    if voice not in SUPPORTED_VOICES:
+        raise ValueError(f"Unsupported voice: {voice}")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_prefs (user_id, voice, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET voice = $2, updated_at = NOW()
+        """, user_id, voice)
 
 
 async def get_plan(pool: asyncpg.Pool, user_id: int) -> str:
@@ -520,10 +550,10 @@ async def translate(text: str, src: str, tgt: str) -> tuple[str, int, int]:
     return result, in_tok, out_tok
 
 
-async def synthesize(text: str, out_path: Path) -> Path:
-    log.info("Synthesizing speech...")
+async def synthesize(text: str, out_path: Path, voice: str = TTS_VOICE) -> Path:
+    log.info("Synthesizing speech with voice=%s...", voice)
     resp = await openai_client.audio.speech.create(
-        model="tts-1", voice=TTS_VOICE, input=text, response_format="opus",
+        model="tts-1", voice=voice, input=text, response_format="opus",
     )
     out_path.write_bytes(resp.content)
     log.info("Wrote %s (%d bytes)", out_path.name, out_path.stat().st_size)
@@ -990,6 +1020,59 @@ async def paysupport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(s["paysupport_text"], disable_web_page_preview=True)
 
 
+async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show two preview voice messages, each with a 'Use this voice' button.
+    User listens, taps the one they want."""
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    user = update.effective_user
+    s = await _strings_for(pool, user.id)
+    await update_user_info(pool, user.id, user.first_name, user.username)
+
+    await update.message.reply_text(s["voice_prompt"])
+
+    previews_dir = Path(__file__).parent / "voice_previews"
+    for voice_id, label in [("alloy", s["voice_label_alloy"]), ("nova", s["voice_label_nova"])]:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"{s['voice_use_btn']} ({label})",
+                callback_data=f"voice_{voice_id}",
+            )
+        ]])
+        try:
+            with open(previews_dir / f"{voice_id}.mp3", "rb") as f:
+                await context.bot.send_voice(
+                    chat_id=update.effective_chat.id,
+                    voice=f,
+                    caption=label,
+                    reply_markup=kb,
+                )
+        except FileNotFoundError:
+            log.warning("Voice preview missing: %s", voice_id)
+
+
+async def voice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle taps on the 'Use this voice' button under each preview."""
+    query = update.callback_query
+    await query.answer()
+    voice_id = query.data[len("voice_"):]
+    if voice_id not in SUPPORTED_VOICES:
+        return
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    user = query.from_user
+    s = await _strings_for(pool, user.id)
+
+    current = await get_user_voice(pool, user.id)
+    if current == voice_id:
+        await query.answer(s[f"voice_already_set_{voice_id}"], show_alert=False)
+        return
+
+    await set_user_voice(pool, user.id, voice_id)
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=s[f"voice_set_{voice_id}"],
+    )
+
+
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pool: asyncpg.Pool = context.bot_data["pool"]
     user = update.effective_user
@@ -1267,7 +1350,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
 
             translation, in_tok, out_tok = await translate(transcript, src_lang, target_lang)
-            await synthesize(translation, out_path)
+            # Voice belongs to the speaker. For solo, that's the current user.
+            # For pair routing, that's still the current user (the one whose
+            # voice was just transcribed) — the listener doesn't get to choose.
+            speaker_voice = await get_user_voice(pool, user.id)
+            await synthesize(translation, out_path, voice=speaker_voice)
 
             whisper_cost = max(duration, 1) * 0.006 / 60
             gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
@@ -1404,6 +1491,7 @@ def main() -> None:
     app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CommandHandler("forward", forward_cmd))
     app.add_handler(CommandHandler("unforward", unforward_cmd))
+    app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CallbackQueryHandler(src_callback,        pattern="^src_"))
     app.add_handler(CallbackQueryHandler(tgt_callback,        pattern="^tgt_"))
     app.add_handler(CallbackQueryHandler(change_src_callback, pattern="^change_src$"))
@@ -1413,6 +1501,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(pair_accept_callback,  pattern="^paccept_"))
     app.add_handler(CallbackQueryHandler(pair_decline_callback, pattern="^pdecline_"))
     app.add_handler(CallbackQueryHandler(forward_undo_callback, pattern="^undo_"))
+    app.add_handler(CallbackQueryHandler(voice_callback,        pattern="^voice_"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
