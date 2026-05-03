@@ -408,6 +408,18 @@ async def get_user_first_name(pool: asyncpg.Pool, user_id: int) -> str | None:
     )
 
 
+def _tutorial_url_for(lang: str | None) -> str:
+    """Return the localized URL of the auto-forward tutorial.
+
+    Falls back to English if the user's source language isn't one of the
+    languages the tutorial is translated into."""
+    base = "https://tryrespeak.com"
+    path = "/blog/auto-forward-voice-messages-telegram"
+    if lang in ("es", "fr", "de", "pt"):
+        return f"{base}/{lang}{path}"
+    return f"{base}{path}"
+
+
 async def is_new_user(pool: asyncpg.Pool, user_id: int) -> bool:
     """True if no row exists in user_prefs for this user. Must be called BEFORE
     update_user_info — that helper UPSERTs and would mask the brand-new state."""
@@ -696,8 +708,13 @@ async def forward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         new_pair = await create_pending_pair(pool, user.id)
         link = f"https://t.me/TryRespeakBot?start={new_pair['pair_code']}"
+        # Tutorial URL adapts to the user's source language so the guide
+        # opens in a language they can read.
+        src, _ = await get_user_prefs(pool, user.id)
+        tutorial_url = _tutorial_url_for(src)
         await update.message.reply_text(
-            s["forward_setup_link"].format(link=link), disable_web_page_preview=True
+            s["forward_setup_link"].format(link=link, tutorial_url=tutorial_url),
+            disable_web_page_preview=True,
         )
         return
 

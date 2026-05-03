@@ -32,7 +32,7 @@ async def test_setup_free_user_blocked(
 @pytest.mark.asyncio
 async def test_setup_no_pair_creates_new(
     mock_msg, mock_update, mock_context, mock_get_plan, mock_get_open_pair,
-    mock_create_pending_pair,
+    mock_create_pending_pair, mock_get_user_prefs,
 ):
     """Basic/Pro user with no existing pair → fresh pair created, link returned."""
     mock_get_plan.return_value = "basic"
@@ -44,6 +44,44 @@ async def test_setup_no_pair_creates_new(
     mock_create_pending_pair.assert_called_once()
     body = mock_msg.reply_text.call_args.args[0]
     assert "t.me/TryRespeakBot?start=pair_NEWCODE" in body
+    # Tutorial URL is included and matches the user's source language
+    assert "tryrespeak.com" in body and "auto-forward-voice-messages-telegram" in body
+
+
+@pytest.mark.asyncio
+async def test_setup_includes_localized_tutorial_url_for_spanish_user(
+    mock_msg, mock_update, mock_context, mock_get_plan, mock_get_open_pair,
+    mock_create_pending_pair, mock_get_user_prefs,
+):
+    """Spanish-speaking user gets the /es/ tutorial URL, not the English one."""
+    mock_get_plan.return_value = "basic"
+    mock_get_open_pair.return_value = None
+    mock_get_user_prefs.return_value = ("es", "es")
+    mock_context.args = ["setup"]
+
+    await bot.forward_cmd(mock_update, mock_context)
+
+    body = mock_msg.reply_text.call_args.args[0]
+    assert "tryrespeak.com/es/blog/auto-forward-voice-messages-telegram" in body
+
+
+@pytest.mark.asyncio
+async def test_setup_english_user_gets_root_tutorial_url(
+    mock_msg, mock_update, mock_context, mock_get_plan, mock_get_open_pair,
+    mock_create_pending_pair, mock_get_user_prefs,
+):
+    """English-speaking user gets the no-prefix URL."""
+    mock_get_plan.return_value = "basic"
+    mock_get_open_pair.return_value = None
+    mock_get_user_prefs.return_value = ("en", "es")
+    mock_context.args = ["setup"]
+
+    await bot.forward_cmd(mock_update, mock_context)
+
+    body = mock_msg.reply_text.call_args.args[0]
+    assert "tryrespeak.com/blog/auto-forward-voice-messages-telegram" in body
+    # Make sure we did NOT accidentally use a /en/ prefix
+    assert "tryrespeak.com/en/" not in body
 
 
 @pytest.mark.asyncio
@@ -108,7 +146,7 @@ async def test_setup_paused_pair_shows_paused_message(
 @pytest.mark.asyncio
 async def test_setup_expired_pending_auto_cleaned_then_creates_new(
     mock_msg, mock_update, mock_context, mock_get_plan, mock_get_open_pair,
-    mock_create_pending_pair, mock_unpair,
+    mock_create_pending_pair, mock_unpair, mock_get_user_prefs,
 ):
     """BUG FIX: Pending pair past its 72h expiry should be auto-marked unpaired
     so the user can immediately create a new one via the same command."""
