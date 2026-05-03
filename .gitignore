@@ -1,6 +1,9 @@
 # Secrets — never commit
 .env
 
+# Claude Code internal state (worktrees, settings, launch config)
+.claude/
+
 # Runtime state — ephemeral, not version-controlled
 user_prefs.json
 *.session
