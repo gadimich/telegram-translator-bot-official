@@ -1031,10 +1031,10 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(s["voice_prompt"])
 
     previews_dir = Path(__file__).parent / "voice_previews"
-    for voice_id, label in [("alloy", s["voice_label_alloy"]), ("nova", s["voice_label_nova"])]:
+    for voice_id, caption in [("alloy", s["voice_label_alloy"]), ("nova", s["voice_label_nova"])]:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton(
-                f"{s['voice_use_btn']} ({label})",
+                s[f"voice_use_{voice_id}"],
                 callback_data=f"voice_{voice_id}",
             )
         ]])
@@ -1043,7 +1043,7 @@ async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_voice(
                     chat_id=update.effective_chat.id,
                     voice=f,
-                    caption=label,
+                    caption=caption,
                     reply_markup=kb,
                 )
         except FileNotFoundError:
