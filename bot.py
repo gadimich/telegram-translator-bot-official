@@ -408,6 +408,22 @@ async def get_user_first_name(pool: asyncpg.Pool, user_id: int) -> str | None:
     )
 
 
+async def is_new_user(pool: asyncpg.Pool, user_id: int) -> bool:
+    """True if no row exists in user_prefs for this user. Must be called BEFORE
+    update_user_info — that helper UPSERTs and would mask the brand-new state."""
+    row = await pool.fetchrow("SELECT 1 FROM user_prefs WHERE user_id = $1", user_id)
+    return row is None
+
+
+async def _notify_admin(context, text: str) -> None:
+    """Best-effort DM to the bot owner. Logs but never raises — admin
+    notifications are a nice-to-have, not load-bearing."""
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+    except Exception as e:
+        log.warning("Admin notification failed: %s", e)
+
+
 # ---------- UI string helpers ----------
 def _tg_lang(user) -> str | None:
     code = (user.language_code or "").split("-")[0].lower()
@@ -506,7 +522,20 @@ async def synthesize(text: str, out_path: Path) -> Path:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
+
+    # Detect first-ever interaction BEFORE update_user_info upserts the row.
+    new_user = await is_new_user(pool, user.id)
+
     await update_user_info(pool, user.id, user.first_name, user.username)
+
+    if new_user:
+        username_str = f" (@{user.username})" if user.username else ""
+        await _notify_admin(
+            context,
+            f"🆕 New user: {user.first_name or 'Unknown'}{username_str}\n"
+            f"ID: {user.id}\n"
+            f"Telegram lang: {user.language_code or 'unknown'}",
+        )
 
     # /start pair_<code> — accepting a forwarding invite
     if context.args and context.args[0].startswith("pair_"):
@@ -1078,6 +1107,15 @@ async def payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     expiry = (datetime.utcnow() + timedelta(days=30)).strftime("%b %-d")
     plan_label = "Basic" if plan == "basic" else "Pro"
     await msg.reply_text(s["plan_activated"].format(plan=plan_label, date=expiry))
+
+    user = msg.from_user
+    username_str = f" (@{user.username})" if user.username else ""
+    await _notify_admin(
+        context,
+        f"💸 Payment: {plan_label} (⭐ {stars})\n"
+        f"User: {user.first_name or 'Unknown'}{username_str}\n"
+        f"ID: {user.id}",
+    )
 
 
 # ---------- Voice handler ----------
