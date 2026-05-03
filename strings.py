@@ -82,6 +82,7 @@ UI_STRINGS: dict[str, str] = {
     "forward_active_status": "✅ Forwarding active to {name}.\n\nVoice messages you send are auto-translated to {lang} and delivered to them. They can reply by tapping & holding your message → Reply.\n\n/forward pause — temporarily stop\n/unforward — remove the pair",
     "forward_paused_status": "⏸ Forwarding paused.\n\n/forward resume — re-enable\n/unforward — remove the pair",
     "forward_pause_done": "Forwarding paused. Voice messages will translate normally for now. Use /forward resume to re-enable.",
+    "forward_pause_pending": "Your pair invite hasn't been accepted yet — nothing to pause. Use /unforward to cancel the invite, or wait for them to accept.",
     "forward_resume_done": "Forwarding resumed. Voice messages will be sent to {name}.",
     "forward_resume_no_pair": "Nothing to resume. Use /forward setup to create a pair.",
     "unforward_done": "Unpaired from {name}. They've been notified.",

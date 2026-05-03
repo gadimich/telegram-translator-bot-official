@@ -636,6 +636,13 @@ async def forward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     pair = await get_open_pair_for_sender(pool, user.id)
 
+    # Auto-clean up an expired pending pair so the user can create a new one.
+    if pair and pair["status"] == "pending" and pair["expires_at"]:
+        from datetime import datetime, timezone
+        if pair["expires_at"] < datetime.now(timezone.utc):
+            await unpair_db(pool, pair["id"])
+            pair = None
+
     if sub == "setup":
         if pair and pair["status"] == "pending":
             link = f"https://t.me/TryRespeakBot?start={pair['pair_code']}"
@@ -643,7 +650,7 @@ async def forward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 s["forward_pending"].format(link=link), disable_web_page_preview=True
             )
             return
-        if pair and pair["status"] in ("active", "paused_user"):
+        if pair and pair["status"] == "active":
             recipient_name = (
                 await get_user_first_name(pool, pair["recipient_id"]) or "user"
             )
@@ -655,6 +662,9 @@ async def forward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             )
             return
+        if pair and pair["status"] == "paused_user":
+            await update.message.reply_text(s["forward_paused_status"])
+            return
         new_pair = await create_pending_pair(pool, user.id)
         link = f"https://t.me/TryRespeakBot?start={new_pair['pair_code']}"
         await update.message.reply_text(
@@ -663,7 +673,16 @@ async def forward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if sub == "pause":
-        if not pair or pair["status"] != "active":
+        if not pair:
+            await update.message.reply_text(s["forward_no_pair"])
+            return
+        if pair["status"] == "pending":
+            await update.message.reply_text(s["forward_pause_pending"])
+            return
+        if pair["status"] == "paused_user":
+            await update.message.reply_text(s["forward_paused_status"])
+            return
+        if pair["status"] != "active":
             await update.message.reply_text(s["forward_no_pair"])
             return
         await pause_pair_db(pool, pair["id"], "paused_user")
@@ -756,7 +775,11 @@ async def pair_lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Format: plang_<code>_<lang>  (code itself is "pair_<...>" so contains _)
     # Strip the "plang_" prefix, then split off the trailing "_<lang>"
     payload = query.data[len("plang_"):]
-    code, lang = payload.rsplit("_", 1)
+    try:
+        code, lang = payload.rsplit("_", 1)
+    except ValueError:
+        log.warning("Malformed plang callback: %s", query.data)
+        return
     user = query.from_user
     pool: asyncpg.Pool = context.bot_data["pool"]
 
