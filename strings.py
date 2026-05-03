@@ -35,7 +35,7 @@ UI_STRINGS: dict[str, str] = {
     "too_long": "That's {duration}s — please keep messages under 5 minutes.",
     "error": "⚠️ Something went wrong: {error}",
     "private_bot": "Sorry, this bot is private. Ask the owner to add your user ID.",
-    "limit_hit": "You've used all {limit} free messages this month. Upgrade to keep translating.",
+    "limit_hit": "You've used all {limit} free messages this month. Basic and Pro keep you translating — and unlock auto-forwarding to a contact.",
     "upgrade_basic_btn": "⭐ Basic — {limit} msgs/month ($5.99)",
     "upgrade_pro_btn": "⭐ Pro — Unlimited ($19.99)",
     "plan_activated": "✅ {plan} activated! You're good until {date}. Send a voice message to keep translating! 🎙",
@@ -77,7 +77,7 @@ UI_STRINGS: dict[str, str] = {
     # Forward feature (auto-forward voice messages to a paired recipient)
     "forward_paid_only": "Auto-forwarding is a Basic and Pro feature. Upgrade to send your voice messages directly to a specific person.",
     "forward_no_pair": "You don't have a forwarding pair set up yet. Use /forward setup to create one.",
-    "forward_setup_link": "Share this link with the person who should receive your translated voice messages:\n\n{link}\n\nThe link expires in 72 hours. Once they accept, your voice messages will be auto-forwarded to them in their language.",
+    "forward_setup_link": "Share this link with the person who should receive your translated voice messages:\n\n{link}\n\nThe link expires in 72 hours. Once they accept, your voice messages will be auto-forwarded to them in their language.\n\n📖 Full guide (rules, replies, billing): https://tryrespeak.com/blog/auto-forward-voice-messages-telegram",
     "forward_pending": "You have a pending invite. Share this link with them:\n\n{link}\n\nWaiting for them to accept.",
     "forward_active_status": "✅ Forwarding active to {name}.\n\nVoice messages you send are auto-translated to {lang} and delivered to them. They can reply by tapping & holding your message → Reply.\n\n/forward pause — temporarily stop\n/unforward — remove the pair",
     "forward_paused_status": "⏸ Forwarding paused.\n\n/forward resume — re-enable\n/unforward — remove the pair",

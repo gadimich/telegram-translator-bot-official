@@ -1046,7 +1046,7 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     plan_desc = "100 messages per month" if plan == "basic" else "Unlimited messages per month"
     # Terms reference appended so the user explicitly accepts by tapping Pay
     # (Telegram Stars policy requires confirmation that user has read T&Cs).
-    description = f"{plan_desc}. Tap Pay to agree to our Terms: tryrespeak.com/terms"
+    description = f"{plan_desc} + auto-forward to a contact. Tap Pay to agree to our Terms: tryrespeak.com/terms"
     try:
         await context.bot.send_invoice(
             chat_id=query.from_user.id,
