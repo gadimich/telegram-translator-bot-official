@@ -31,10 +31,13 @@ async def test_voice_cmd_sends_prompt_and_two_previews(
     # Two send_voice calls (alloy + nova previews)
     sent = mock_context.bot.send_voice.call_args_list
     assert len(sent) == 2
-    # Captions are the labels
+    # Captions are the user-facing labels (Male / Female, never the raw
+    # OpenAI voice names like 'alloy'/'nova')
     captions = [c.kwargs["caption"] for c in sent]
-    assert any("Alloy" in cap for cap in captions)
-    assert any("Nova" in cap for cap in captions)
+    assert any("Male" in cap for cap in captions)
+    assert any("Female" in cap for cap in captions)
+    # Implementation details (OpenAI voice ids) must not leak
+    assert not any("Alloy" in cap or "Nova" in cap for cap in captions)
 
     # Each voice message has a "Use this voice" button with voice_<id> callback
     for c in sent:
@@ -66,7 +69,9 @@ async def test_voice_callback_sets_voice_and_confirms(
     # Confirmation sent
     mock_context.bot.send_message.assert_called_once()
     confirmation = mock_context.bot.send_message.call_args.kwargs["text"]
-    assert "Nova" in confirmation
+    assert "female" in confirmation.lower()
+    # Raw OpenAI voice id must not leak into the confirmation
+    assert "nova" not in confirmation.lower()
 
 
 @pytest.mark.asyncio

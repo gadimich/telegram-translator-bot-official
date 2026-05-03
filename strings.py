@@ -47,7 +47,7 @@ UI_STRINGS: dict[str, str] = {
         "Commands:\n"
         "/start – greeting + setup\n"
         "/lang – show or change your language settings\n"
-        "/voice – pick a voice (alloy or nova) for your translations\n"
+        "/voice – pick a voice (male or female) for your translations\n"
         "/balance – view your plan and remaining messages\n"
         "/forward – set up auto-forwarding to a paired person (Basic / Pro)\n"
         "/unforward – remove the forwarding pair\n"
@@ -107,14 +107,14 @@ UI_STRINGS: dict[str, str] = {
     "forward_failed_quota": "⚠️ Couldn't forward — your monthly limit reached. Upgrade or wait for next month.",
     # Voice picker
     "voice_prompt": "🎙 Pick the voice your translations will sound like.\n\nListen to both previews below, then tap the one you want.",
-    "voice_label_alloy": "Alloy (neutral)",
-    "voice_label_nova": "Nova (warm)",
-    "voice_use_alloy": "✓ Use Alloy",
-    "voice_use_nova": "✓ Use Nova",
-    "voice_set_alloy": "✅ Voice set to Alloy. Send me a voice message to hear it.",
-    "voice_set_nova": "✅ Voice set to Nova. Send me a voice message to hear it.",
-    "voice_already_set_alloy": "✓ Already on Alloy.",
-    "voice_already_set_nova": "✓ Already on Nova.",
+    "voice_label_alloy": "Male",
+    "voice_label_nova": "Female",
+    "voice_use_alloy": "✓ Use male voice",
+    "voice_use_nova": "✓ Use female voice",
+    "voice_set_alloy": "✅ Set to male voice. Send me a voice message to hear it.",
+    "voice_set_nova": "✅ Set to female voice. Send me a voice message to hear it.",
+    "voice_already_set_alloy": "✓ Already using the male voice.",
+    "voice_already_set_nova": "✓ Already using the female voice.",
 }
 
 # Content hash of UI_STRINGS — when developer changes any value or key, this changes,
