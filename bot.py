@@ -1436,6 +1436,22 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"⭐ Bot balance: {stars} Stars")
 
 
+async def message_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if len(args) < 2 or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /message <user_id> <text>")
+        return
+    target_id = int(args[0])
+    text = update.message.text.split(None, 2)[2]
+    try:
+        await context.bot.send_message(chat_id=target_id, text=text)
+        await update.message.reply_text(f"✅ Sent to {target_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed: {type(e).__name__}: {e}")
+
+
 # ---------- Error handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
@@ -1489,6 +1505,7 @@ def main() -> None:
     app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("setlang", setlang))
     app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(CommandHandler("message", message_cmd))
     app.add_handler(CommandHandler("forward", forward_cmd))
     app.add_handler(CommandHandler("unforward", unforward_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
