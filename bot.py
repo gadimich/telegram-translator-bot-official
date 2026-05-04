@@ -1445,9 +1445,17 @@ async def message_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     target_id = int(args[0])
     text = update.message.text.split(None, 2)[2]
+    pool = context.application.bot_data["pool"]
+    src, _ = await get_user_prefs(pool, target_id)
+    out = text
+    if src and src != "en":
+        try:
+            out, _, _ = await translate(text, "en", src)
+        except Exception as e:
+            log.warning("Admin /message translate failed: %s", e)
     try:
-        await context.bot.send_message(chat_id=target_id, text=text)
-        await update.message.reply_text(f"✅ Sent to {target_id}")
+        await context.bot.send_message(chat_id=target_id, text=out)
+        await update.message.reply_text(f"✅ Sent to {target_id} (lang={src or '?'})\n\n{out}")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {type(e).__name__}: {e}")
 
