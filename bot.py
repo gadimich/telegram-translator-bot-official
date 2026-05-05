@@ -21,6 +21,7 @@ from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -211,6 +212,15 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 pair_id              INT NOT NULL REFERENCES forward_pairs(id) ON DELETE CASCADE,
                 created_at           TIMESTAMPTZ DEFAULT NOW(),
                 PRIMARY KEY (delivered_chat_id, delivered_message_id)
+            )
+        """)
+        # Groups feature: a Pro user adds the bot to a group, the bot translates
+        # every voice message in the group between the owner's src/tgt languages.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_subs (
+                chat_id        BIGINT PRIMARY KEY,
+                owner_user_id  BIGINT NOT NULL,
+                created_at     TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
@@ -1246,18 +1256,90 @@ async def _determine_routing(
     return ("solo", None)
 
 
+async def _handle_group_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    user = update.effective_user
+    pool: asyncpg.Pool = context.bot_data["pool"]
+
+    owner_id = await get_group_owner(pool, msg.chat.id)
+    if not owner_id:
+        return  # bot is in a group with no active sub — ignore
+
+    if await get_plan(pool, owner_id) != "pro":
+        log.info("Group %s owner %s lost Pro — leaving", msg.chat.id, owner_id)
+        await remove_group_sub(pool, msg.chat.id)
+        try:
+            await context.bot.leave_chat(msg.chat.id)
+        except Exception:
+            pass
+        return
+
+    src, tgt = await get_user_prefs(pool, owner_id)
+    if not src or not tgt:
+        return
+
+    target_lang = tgt if user.id == owner_id else src
+
+    audio_obj = msg.voice or msg.audio
+    duration = getattr(audio_obj, "duration", 0)
+    if duration > 300:
+        return  # silently skip overly long messages in groups
+
+    log.info(
+        "Group voice in %s from %s -> %s (owner=%s, %ds)",
+        msg.chat.id, user.id, target_lang, owner_id, duration,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        in_path = td / "input.ogg"
+        out_path = td / "translated.ogg"
+        try:
+            tg_file = await audio_obj.get_file()
+            await tg_file.download_to_drive(custom_path=str(in_path))
+
+            transcript, src_lang = await transcribe(in_path, hint=src)
+            if not transcript:
+                return
+            if src_lang == target_lang:
+                return  # already in target — skip
+
+            translation, in_tok, out_tok = await translate(transcript, src_lang, target_lang)
+            speaker_voice = await get_user_voice(pool, user.id)
+            await synthesize(translation, out_path, voice=speaker_voice)
+
+            with open(out_path, "rb") as f:
+                await context.bot.send_voice(
+                    chat_id=msg.chat.id,
+                    voice=f,
+                    reply_to_message_id=msg.message_id,
+                )
+
+            whisper_cost = max(duration, 1) * 0.006 / 60
+            gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
+            tts_cost     = len(translation) * 15.0 / 1_000_000
+            total_cost   = whisper_cost + gpt_cost + tts_cost
+            await increment_usage(pool, owner_id, total_cost)
+        except Exception:
+            log.exception("Group pipeline failed in chat %s", msg.chat.id)
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     user = update.effective_user
     pool: asyncpg.Pool = context.bot_data["pool"]
 
+    if not (msg.voice or msg.audio):
+        return
+
+    if msg.chat.type in ("group", "supergroup"):
+        await _handle_group_voice(update, context)
+        return
+
     if ALLOWED_USERS and user.id not in ALLOWED_USERS:
         log.warning("Unauthorized user %s (%s)", user.id, user.username)
         s = await _strings_for(pool, user.id)
         await msg.reply_text(s["private_bot"])
-        return
-
-    if not (msg.voice or msg.audio):
         return
 
     await update_user_info(pool, user.id, user.first_name, user.username)
@@ -1423,6 +1505,118 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await status.edit_text(s["error"].format(error=type(e).__name__))
 
 
+# ---------- Groups ----------
+GROUP_MAX_MEMBERS = 10
+
+
+async def add_group_sub(pool: asyncpg.Pool, chat_id: int, owner_user_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO group_subs (chat_id, owner_user_id, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (chat_id) DO UPDATE
+                SET owner_user_id = $2, created_at = NOW()
+        """, chat_id, owner_user_id)
+
+
+async def remove_group_sub(pool: asyncpg.Pool, chat_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM group_subs WHERE chat_id = $1", chat_id)
+
+
+async def get_group_owner(pool: asyncpg.Pool, chat_id: int) -> int | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_user_id FROM group_subs WHERE chat_id = $1", chat_id
+        )
+    return row["owner_user_id"] if row else None
+
+
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cmu = update.my_chat_member
+    if not cmu:
+        return
+    chat = cmu.chat
+    if chat.type not in ("group", "supergroup"):
+        return  # private chats / channels go through other flows
+
+    pool: asyncpg.Pool = context.bot_data["pool"]
+    old_status = cmu.old_chat_member.status
+    new_status = cmu.new_chat_member.status
+    became_member = (
+        new_status in ("member", "administrator")
+        and old_status not in ("member", "administrator")
+    )
+    left_chat = (
+        new_status in ("left", "kicked")
+        and old_status in ("member", "administrator")
+    )
+
+    if left_chat:
+        await remove_group_sub(pool, chat.id)
+        log.info("Bot removed from group %s — sub deleted", chat.id)
+        return
+
+    if not became_member:
+        return
+
+    adder = cmu.from_user
+    s = await _strings_for(pool, adder.id) if adder else UI_STRINGS
+
+    try:
+        count = await context.bot.get_chat_member_count(chat.id)
+    except Exception as e:
+        log.warning("get_chat_member_count failed for %s: %s", chat.id, e)
+        count = 0
+
+    if count > GROUP_MAX_MEMBERS:
+        log.info("Group %s rejected: %d > %d members", chat.id, count, GROUP_MAX_MEMBERS)
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=s["group_too_big"].format(max=GROUP_MAX_MEMBERS, count=count),
+            )
+        except Exception:
+            pass
+        await context.bot.leave_chat(chat.id)
+        return
+
+    plan = await get_plan(pool, adder.id) if adder else "free"
+    if plan != "pro":
+        log.info("Group %s rejected: adder %s is %s (not pro)", chat.id, adder.id if adder else "?", plan)
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=s["group_pro_only"])
+        except Exception:
+            pass
+        await context.bot.leave_chat(chat.id)
+        return
+
+    src, tgt = await get_user_prefs(pool, adder.id)
+    if not src or not tgt:
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=s["group_owner_setup_first"])
+        except Exception:
+            pass
+        await context.bot.leave_chat(chat.id)
+        return
+
+    await add_group_sub(pool, chat.id, adder.id)
+    src_name = SUPPORTED.get(src, {}).get("name", src)
+    tgt_name = SUPPORTED.get(tgt, {}).get("name", tgt)
+    log.info("Group %s activated by Pro user %s (%s <-> %s)", chat.id, adder.id, src, tgt)
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=s["group_active"].format(src=src_name, tgt=tgt_name),
+        )
+    except Exception as e:
+        log.warning("Group welcome msg failed: %s", e)
+    await _notify_admin(
+        context, f"👥 New group: {chat.title or chat.id} ({count} members) "
+                 f"by user {adder.id} ({adder.username or adder.first_name})"
+    )
+
+
 # ---------- Admin ----------
 ADMIN_ID = 981622851
 
@@ -1530,6 +1724,7 @@ def main() -> None:
     app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
 
     log.info("Bot starting. Allowed users: %s",
              ALLOWED_USERS if ALLOWED_USERS else "ANYONE (open)")

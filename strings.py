@@ -115,6 +115,11 @@ UI_STRINGS: dict[str, str] = {
     "voice_set_nova": "✅ Set to female voice. Send me a voice message to hear it.",
     "voice_already_set_alloy": "✓ Already using the male voice.",
     "voice_already_set_nova": "✓ Already using the female voice.",
+    # Groups feature
+    "group_pro_only": "👋 Respeak Groups is a Pro feature. Upgrade to Pro in our DM (/start) and add me back. Leaving for now.",
+    "group_too_big": "👋 Respeak Groups supports up to {max} members. This group has {count}. Leaving for now.",
+    "group_owner_setup_first": "👋 Finish your language setup first — open our DM and run /start. Leaving for now.",
+    "group_active": "✅ Respeak active in this group.\n\nI'll translate voice messages between {src} and {tgt}, replying to each one with the translated audio.\n\nTip: make me an admin so I can hear every voice message — Telegram hides them from non-admin bots by default.",
 }
 
 # Content hash of UI_STRINGS — when developer changes any value or key, this changes,
