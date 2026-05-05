@@ -1298,7 +1298,11 @@ async def _handle_group_voice(update: Update, context: ContextTypes.DEFAULT_TYPE
             tg_file = await audio_obj.get_file()
             await tg_file.download_to_drive(custom_path=str(in_path))
 
-            transcript, src_lang = await transcribe(in_path, hint=src)
+            # Only hint Whisper with the owner's source when the OWNER is
+            # speaking — otherwise we'd bias detection of every other group
+            # member's voice toward the owner's language.
+            hint = src if user.id == owner_id else None
+            transcript, src_lang = await transcribe(in_path, hint=hint)
             if not transcript:
                 return
             if src_lang == target_lang:
