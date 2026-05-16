@@ -121,7 +121,7 @@ def settings_keyboard(s: dict) -> InlineKeyboardMarkup:
 FREE_LIMIT  = int(os.getenv("FREE_LIMIT",  "10"))
 BASIC_LIMIT = int(os.getenv("BASIC_LIMIT", "100"))
 PLAN_LIMITS: dict[str, int | None] = {"free": FREE_LIMIT, "basic": BASIC_LIMIT, "pro": None}
-PLAN_STARS:  dict[str, int]        = {"basic": int(os.getenv("BASIC_STARS", "460")), "pro": int(os.getenv("PRO_STARS", "1538"))}
+PLAN_STARS:  dict[str, int]        = {"basic": int(os.getenv("BASIC_STARS", "153")), "pro": int(os.getenv("PRO_STARS", "460"))}
 
 
 def upgrade_keyboard(s: dict) -> InlineKeyboardMarkup:
