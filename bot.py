@@ -1671,6 +1671,25 @@ async def message_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"❌ Failed: {type(e).__name__}: {e}")
 
 
+async def setplan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: force a plan for testing. /setplan <free|basic|pro> [user_id].
+    Defaults to the admin's own account when no user_id is given."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args or []
+    if not args or args[0] not in ("free", "basic", "pro"):
+        await update.message.reply_text("Usage: /setplan <free|basic|pro> [user_id]")
+        return
+    plan = args[0]
+    if len(args) > 1 and args[1].lstrip("-").isdigit():
+        target_id = int(args[1])
+    else:
+        target_id = update.effective_user.id
+    pool = context.application.bot_data["pool"]
+    await set_plan(pool, target_id, plan)
+    await update.message.reply_text(f"✅ Plan for {target_id} set to {plan} (valid 1 month).")
+
+
 # ---------- Error handler ----------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
@@ -1725,6 +1744,7 @@ def main() -> None:
     app.add_handler(CommandHandler("setlang", setlang))
     app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CommandHandler("message", message_cmd))
+    app.add_handler(CommandHandler("setplan", setplan_cmd))
     app.add_handler(CommandHandler("forward", forward_cmd))
     app.add_handler(CommandHandler("unforward", unforward_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
