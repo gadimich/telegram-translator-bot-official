@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import bot
+from strings import UI_STRINGS
 from .conftest import make_pair
 
 
@@ -103,6 +104,71 @@ async def test_no_speech_returns_friendly_message(
     # status message was edited to no_speech
     edits = [c.args[0] for c in mock_status_msg.edit_text.call_args_list]
     assert any("speech" in e.lower() or "again" in e.lower() for e in edits)
+
+
+# ---------- First-translation tip ----------
+
+@pytest.mark.asyncio
+async def test_solo_first_translation_sends_tip(
+    mock_msg, mock_update, mock_context, voice_pipeline,
+):
+    """A brand-new user (zero lifetime messages) gets the forwarding/upsell tip
+    appended after their first solo translation."""
+    voice_pipeline["get_user_prefs"].return_value = ("en", "es")
+    voice_pipeline["get_active_pair"].return_value = None
+    voice_pipeline["find_pair_by_replied"].return_value = None
+    voice_pipeline["get_total_message_count"].return_value = 0  # never translated before
+
+    await bot.handle_voice(mock_update, mock_context)
+
+    sent_texts = [
+        c.kwargs.get("text", "") for c in mock_context.bot.send_message.call_args_list
+    ]
+    assert UI_STRINGS["first_translation_tip"] in sent_texts
+    # Tip lands in the user's own chat, after transcript + translation.
+    tip_call = next(
+        c for c in mock_context.bot.send_message.call_args_list
+        if c.kwargs.get("text") == UI_STRINGS["first_translation_tip"]
+    )
+    assert tip_call.kwargs["chat_id"] == 1001
+
+
+@pytest.mark.asyncio
+async def test_solo_returning_user_no_tip(
+    mock_msg, mock_update, mock_context, voice_pipeline,
+):
+    """A user who has translated before does NOT get the tip again."""
+    voice_pipeline["get_user_prefs"].return_value = ("en", "es")
+    voice_pipeline["get_active_pair"].return_value = None
+    voice_pipeline["find_pair_by_replied"].return_value = None
+    voice_pipeline["get_total_message_count"].return_value = 3  # already used the bot
+
+    await bot.handle_voice(mock_update, mock_context)
+
+    sent_texts = [
+        c.kwargs.get("text", "") for c in mock_context.bot.send_message.call_args_list
+    ]
+    assert UI_STRINGS["first_translation_tip"] not in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_pair_first_message_no_tip(
+    mock_msg, mock_update, mock_context, voice_pipeline,
+):
+    """The tip is solo-only — a paired send is voice-only and never carries it,
+    even on the sender's very first message."""
+    pair = make_pair(status="active", sender_id=1001, recipient_id=2002)
+    voice_pipeline["get_active_pair"].return_value = pair
+    voice_pipeline["find_pair_by_replied"].return_value = None
+    voice_pipeline["get_user_prefs"].side_effect = [("en", "es"), ("pt", "pt")]
+    voice_pipeline["get_total_message_count"].return_value = 0
+
+    await bot.handle_voice(mock_update, mock_context)
+
+    sent_texts = [
+        c.kwargs.get("text", "") for c in mock_context.bot.send_message.call_args_list
+    ]
+    assert UI_STRINGS["first_translation_tip"] not in sent_texts
 
 
 # ---------- Pair path: channel-owner sending ----------

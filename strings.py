@@ -34,6 +34,7 @@ UI_STRINGS: dict[str, str] = {
     "no_speech": "Couldn't hear any speech in that. Try again?",
     "too_long": "That's {duration}s — please keep messages under 5 minutes.",
     "error": "⚠️ Something went wrong: {error}",
+    "first_translation_tip": "💡 Tip: you can forward that voice message to anyone — just like a normal Telegram message.\n\nWant your voice messages delivered to one person automatically, every time? That's auto-forwarding, available on Basic and Pro. For small group chats, live group voice translation is available on Pro. Tap /start to explore plans.",
     "private_bot": "Sorry, this bot is private. Ask the owner to add your user ID.",
     "limit_hit": "You've used all {limit} free messages this month. Basic and Pro keep you translating — and unlock auto-forwarding to a contact.",
     "upgrade_basic_btn": "⭐ Basic — {limit} msgs/month ($5.99)",

@@ -222,6 +222,15 @@ def mock_get_message_count(monkeypatch):
 
 
 @pytest.fixture
+def mock_get_total_message_count(monkeypatch):
+    """Lifetime message count across all periods. Default 5 (an existing user)
+    so the first-translation tip does not fire in unrelated voice tests."""
+    mock = AsyncMock(return_value=5)
+    monkeypatch.setattr(bot, "get_total_message_count", mock)
+    return mock
+
+
+@pytest.fixture
 def mock_increment_usage(monkeypatch):
     mock = AsyncMock()
     monkeypatch.setattr(bot, "increment_usage", mock)
@@ -304,7 +313,8 @@ def mock_get_user_voice(monkeypatch):
 def voice_pipeline(
     mock_transcribe, mock_translate, mock_synthesize,
     mock_increment_usage, mock_record_forward,
-    mock_get_message_count, mock_get_plan, mock_get_user_prefs,
+    mock_get_message_count, mock_get_total_message_count,
+    mock_get_plan, mock_get_user_prefs,
     mock_get_active_pair, mock_find_pair_by_replied,
     mock_get_user_first_name, mock_update_user_info, mock_get_user_voice,
 ):
@@ -318,6 +328,7 @@ def voice_pipeline(
         "increment_usage": mock_increment_usage,
         "record_forward": mock_record_forward,
         "get_message_count": mock_get_message_count,
+        "get_total_message_count": mock_get_total_message_count,
         "get_plan": mock_get_plan,
         "get_user_prefs": mock_get_user_prefs,
         "get_active_pair": mock_get_active_pair,

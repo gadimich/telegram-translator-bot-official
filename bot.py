@@ -322,6 +322,14 @@ async def increment_usage(pool: asyncpg.Pool, user_id: int, cost_usd: float = 0.
         """, user_id, period, cost_usd)
 
 
+async def get_total_message_count(pool: asyncpg.Pool, user_id: int) -> int:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(count), 0) AS total FROM usage WHERE user_id = $1", user_id
+        )
+    return row["total"] if row else 0
+
+
 async def update_user_info(pool: asyncpg.Pool, user_id: int, first_name: str | None, username: str | None) -> None:
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -1500,9 +1508,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     chat_id=target_chat, text=f"{tgt_flag} {translation}"
                 )
                 await status.delete()
+                is_first_translation = await get_total_message_count(pool, user.id) == 0
                 await increment_usage(pool, billing_user_id, total_cost)
                 if FORWARD_TO and str(target_chat) != str(msg.chat_id):
                     await msg.reply_text(f"✅ Sent to {FORWARD_TO}")
+                if is_first_translation:
+                    await context.bot.send_message(
+                        chat_id=target_chat, text=s["first_translation_tip"]
+                    )
 
         except Exception as e:
             log.exception("Pipeline failed")
