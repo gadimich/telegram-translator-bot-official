@@ -32,7 +32,7 @@ UI_STRINGS: dict[str, str] = {
     "translating": "🎧 Translating...",
     "translating_langs": "🎧 Translating {src} → {tgt}...",
     "no_speech": "Couldn't hear any speech in that. Try again?",
-    "too_long": "That's {duration}s — please keep messages under 5 minutes.",
+    "too_long": "That's {duration}s — please keep messages under 6 minutes.",
     "error": "⚠️ Something went wrong: {error}",
     "first_translation_tip": "💡 Tip: you can forward that voice message to anyone — just like a normal Telegram message.\n\nWant your voice messages delivered to one person automatically, every time? That's auto-forwarding, available on Basic and Pro. For small group chats, live group voice translation is available on Pro. Tap /start to explore plans.",
     "private_bot": "Sorry, this bot is private. Ask the owner to add your user ID.",

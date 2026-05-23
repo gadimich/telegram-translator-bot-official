@@ -1415,7 +1415,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user.username or user.first_name, user.id, duration, routing_mode,
     )
 
-    if duration > 300:
+    if duration > 360:
         await msg.reply_text(s["too_long"].format(duration=duration))
         return
 
