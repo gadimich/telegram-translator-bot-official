@@ -51,6 +51,11 @@ ALLOWED_USERS = {
 }
 TTS_VOICE = os.getenv("TTS_VOICE", "alloy")
 
+# Voice cloning (ElevenLabs IVC) — Pro-only, off by default.
+VOICE_CLONE_ENABLED = os.getenv("VOICE_CLONE_ENABLED", "false").lower() in ("1", "true", "yes")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+
 # ---------- Language config ----------
 SUPPORTED: dict[str, dict] = {
     "en": {"name": "English",    "flag": "🇬🇧"},
@@ -576,6 +581,73 @@ async def synthesize(text: str, out_path: Path, voice: str = TTS_VOICE) -> Path:
     out_path.write_bytes(resp.content)
     log.info("Wrote %s (%d bytes)", out_path.name, out_path.stat().st_size)
     return out_path
+
+
+async def synthesize_cloned(source_audio: Path, text: str, out_path: Path) -> Path:
+    """Clone the voice in source_audio via ElevenLabs Instant Voice Cloning,
+    synthesize `text` in that cloned voice, then delete the temp voice from the
+    ElevenLabs account so we don't fill the voice-slot quota. Raises on any
+    failure — callers should catch and fall back to synthesize()."""
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("ELEVENLABS_API_KEY not set")
+    import httpx
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}
+    log.info("Cloning voice from %s ...", source_audio.name)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        with open(source_audio, "rb") as f:
+            files = {"files": (source_audio.name, f, "audio/ogg")}
+            data = {"name": f"tmp_{source_audio.stem}"}
+            r = await client.post(
+                "https://api.elevenlabs.io/v1/voices/add",
+                headers=headers, data=data, files=files,
+            )
+            r.raise_for_status()
+            voice_id = r.json()["voice_id"]
+        try:
+            r = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                headers={**headers, "accept": "audio/ogg"},
+                params={"output_format": "opus_48000_64"},
+                json={"text": text, "model_id": ELEVENLABS_MODEL},
+            )
+            r.raise_for_status()
+            out_path.write_bytes(r.content)
+        finally:
+            try:
+                await client.delete(
+                    f"https://api.elevenlabs.io/v1/voices/{voice_id}",
+                    headers=headers,
+                )
+            except Exception as e:
+                log.warning("ElevenLabs voice cleanup failed for %s: %s", voice_id, e)
+    log.info("Wrote cloned %s (%d bytes)", out_path.name, out_path.stat().st_size)
+    return out_path
+
+
+async def synthesize_for_speaker(
+    pool: asyncpg.Pool,
+    speaker_id: int,
+    source_audio: Path,
+    text: str,
+    out_path: Path,
+    clone: bool,
+) -> tuple[Path, bool]:
+    """Synthesize `text` for a given speaker. When `clone` is True and the
+    feature is configured, clones the speaker's voice from `source_audio`;
+    otherwise (or on any clone failure) falls back to the speaker's preset TTS.
+    Returns (path, cloned) — the caller uses `cloned` to bill the higher
+    ElevenLabs cost. The Pro-entitlement decision lives in the caller because
+    it depends on context (own plan for solo/pair, group-owner's plan for
+    groups)."""
+    if clone and VOICE_CLONE_ENABLED and ELEVENLABS_API_KEY:
+        try:
+            await synthesize_cloned(source_audio, text, out_path)
+            return out_path, True
+        except Exception as e:
+            log.warning("Voice clone failed for speaker %s (%s) — falling back to preset TTS", speaker_id, e)
+    speaker_voice = await get_user_voice(pool, speaker_id)
+    await synthesize(text, out_path, voice=speaker_voice)
+    return out_path, False
 
 
 # ---------- Handlers ----------
@@ -1317,8 +1389,12 @@ async def _handle_group_voice(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return  # already in target — skip
 
             translation, in_tok, out_tok = await translate(transcript, src_lang, target_lang)
-            speaker_voice = await get_user_voice(pool, user.id)
-            await synthesize(translation, out_path, voice=speaker_voice)
+            # Group entitlement belongs to the owner (Pro-only feature), so
+            # every speaker in the group gets their own voice cloned regardless
+            # of that speaker's personal plan.
+            _, cloned = await synthesize_for_speaker(
+                pool, user.id, in_path, translation, out_path, clone=True,
+            )
 
             with open(out_path, "rb") as f:
                 await context.bot.send_voice(
@@ -1329,7 +1405,9 @@ async def _handle_group_voice(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             whisper_cost = max(duration, 1) * 0.006 / 60
             gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
-            tts_cost     = len(translation) * 15.0 / 1_000_000
+            # ElevenLabs Multilingual v2 ≈ $0.30 / 1k chars vs OpenAI tts-1 $15/1M.
+            tts_rate     = 300.0 if cloned else 15.0
+            tts_cost     = len(translation) * tts_rate / 1_000_000
             total_cost   = whisper_cost + gpt_cost + tts_cost
             await increment_usage(pool, owner_id, total_cost)
         except Exception:
@@ -1447,12 +1525,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Voice belongs to the speaker. For solo, that's the current user.
             # For pair routing, that's still the current user (the one whose
             # voice was just transcribed) — the listener doesn't get to choose.
-            speaker_voice = await get_user_voice(pool, user.id)
-            await synthesize(translation, out_path, voice=speaker_voice)
+            # Clone-eligibility follows the billing user's plan (the pair
+            # channel-owner in pair mode, the speaker themselves in solo).
+            clone_ok = await get_plan(pool, billing_user_id) == "pro"
+            _, cloned = await synthesize_for_speaker(
+                pool, user.id, in_path, translation, out_path, clone=clone_ok,
+            )
 
             whisper_cost = max(duration, 1) * 0.006 / 60
             gpt_cost     = (in_tok * 0.150 + out_tok * 0.600) / 1_000_000
-            tts_cost     = len(translation) * 15.0 / 1_000_000
+            # ElevenLabs Multilingual v2 ≈ $0.30 / 1k chars vs OpenAI tts-1 $15/1M.
+            tts_rate     = 300.0 if cloned else 15.0
+            tts_cost     = len(translation) * tts_rate / 1_000_000
             total_cost   = whisper_cost + gpt_cost + tts_cost
 
             if routing_mode == "pair":
